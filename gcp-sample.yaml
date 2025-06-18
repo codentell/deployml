@@ -1,11 +1,25 @@
-name: aws-mlops-stack-mlflow
+name: gcp-mlops-stack-mlflow
 provider:
   name: gcp
   project_id: mlops-intro-461805
   region: us-west1
 deployment:
-  type: cloud_vm
+  type: cloud_run
 stack:
   - experiment_tracking:
       name: mlflow
-      version: 2.10.0
+      params:
+        image: gcr.io/mlops-intro-461805/mlflow/mlflow:latest
+        service_name: mlflow-server 
+        memory_limit: "1Gi"  # Add this line
+        cpu_limit: "1000m"   # Add this line
+  - artifact_tracking:
+      name: mlflow
+      params: 
+        image: gcr.io/mlops-intro-461805/mlflow/mlflow:latest
+        artifact_bucket: mlflow-artifact-bucket-mlops-intro-461805
+  - model_registry:
+      name: mlflow
+      params: 
+        image: gcr.io/mlops-intro-461805/mlflow/mlflow:latest
+        backend_store_uri: sqlite:///mlflow.db
