@@ -11,8 +11,8 @@ stack:
       params:
         image: gcr.io/mlops-intro-461805/mlflow/mlflow:latest
         service_name: mlflow-server 
-        memory_limit: "1Gi"  # Add this line
-        cpu_limit: "1000m"   # Add this line
+        memory_limit: 1Gi  # Add this line
+        cpu_limit: 1000m   # Add this line
   - artifact_tracking:
       name: mlflow
       params: 
