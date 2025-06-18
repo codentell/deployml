@@ -1,0 +1,6 @@
+{% for var in variables %}
+variable "{{ var.name }}" {
+    type = {{ var.type }}
+    description = "{{ var.description }}"
+}
+{% endfor %}

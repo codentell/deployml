@@ -1,0 +1,5 @@
+project_id = "mlops-intro-461805"
+    region = "us-west1"
+    artifact_bucket = "mlflow-artifacts-mlops-intro-461805"
+    backend_store_uri = "sqlite:///mlflow.db"
+    image = "us-docker.pkg.dev/mlops-intro-461805/mlflow/mlflow:latest"

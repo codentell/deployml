@@ -1,0 +1,11 @@
+name: aws-mlops-stack-mlflow
+provider:
+  name: gcp
+  project_id: mlops-intro-461805
+  region: "us-west1"
+deployment:
+  type: cloud_run
+stack:
+  - experiment_tracking:
+      name: mlflow
+      version: 2.10.0

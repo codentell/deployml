@@ -1,0 +1,27 @@
+
+
+
+provider "{% if cloud == 'gcp' %}google{% elif cloud == 'aws' %}aws{% else %}{{cloud}}{% endif%}" {
+    {% if cloud == "gcp" %}
+    project = var.project_id
+    region = var.region
+    {% elif cloud == "aws" %}
+    region = var.region
+    {% endif %}
+    
+}
+
+{% for tool in tools %}
+module "{{ tool }}" {
+    source             = "./modules/{{ tool }}/cloud/{{ cloud }}/{{ service }}"
+    project_id         = var.project_id 
+    region             = var.region 
+    artifact_bucket    = var.artifact_bucket
+    backend_store_uri  = var.backend_store_uri 
+    image              = var.image 
+}
+{% endfor %}
+
+output "mlflow_url" {
+    value = module.mlflow.service_url
+}
