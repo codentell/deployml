@@ -1,6 +1,3 @@
-
-
-
 provider "{% if cloud == 'gcp' %}google{% elif cloud == 'aws' %}aws{% else %}{{cloud}}{% endif%}" {
     {% if cloud == "gcp" %}
     project = var.project_id
@@ -8,20 +5,57 @@ provider "{% if cloud == 'gcp' %}google{% elif cloud == 'aws' %}aws{% else %}{{c
     {% elif cloud == "aws" %}
     region = var.region
     {% endif %}
-    
 }
 
-{% for tool in tools %}
-module "{{ tool }}" {
-    source             = "./modules/{{ tool }}/cloud/{{ cloud }}/{{ service }}"
-    project_id         = var.project_id 
-    region             = var.region 
-    artifact_bucket    = var.artifact_bucket
-    backend_store_uri  = var.backend_store_uri 
-    image              = var.image 
+{% for stage in stack %}
+  {% for stage_name, tool in stage.items() %}
+module "{{ stage_name }}_{{ tool.name }}" {
+  source = "./modules/{{ tool.name }}/cloud/{{ cloud }}/{{ deployment_type }}"
+  count  = var.enable_{{ stage_name }}_{{ tool.name }} ? 1 : 0
+  
+  project_id = var.project_id
+  region     = var.region
+  
+  # Control what gets created based on the module purpose
+  create_service = {% if stage_name == "experiment_tracking" %}true{% else %}false{% endif %}
+  create_bucket  = {% if stage_name == "artifact_tracking" %}true{% else %}false{% endif %}
+  allow_public_access = var.allow_public_access
+  
+  # Resource configuration
+  cpu_limit = var.cpu_limit
+  memory_limit = var.memory_limit
+  cpu_request = var.cpu_request
+  memory_request = var.memory_request
+  max_scale = var.max_scale
+  container_concurrency = var.container_concurrency
+  
+  # Always pass artifact_bucket to all modules (needed for env vars)
+  artifact_bucket = var.artifact_bucket
+  
+  {% for key, value in tool.params.items() %}
+    {%- set resource_params = ["cpu_limit", "memory_limit", "cpu_request", "memory_request", "max_scale", "container_concurrency"] -%}
+    {% if key == "backend_store_uri" %}
+  backend_store_uri = var.backend_store_uri != "" ? var.backend_store_uri : "${var.db_type}+pymysql://${var.db_user}:${var.db_password}@127.0.0.1:${var.db_port}/${var.db_name}"
+    {% elif key == "image" %}
+  image = var.{{ stage_name }}_{{ tool.name }}_image != "" ? var.{{ stage_name }}_{{ tool.name }}_image : var.global_image
+    {% elif key == "artifact_bucket" %}
+  # Skip - already handled above
+    {% elif key not in resource_params %}
+  {{ key }} = var.{{ key }}
+    {% endif %}
+  {% endfor %}
 }
+  {% endfor %}
 {% endfor %}
 
-output "mlflow_url" {
-    value = module.mlflow.service_url
+{% for stage in stack %}
+  {% for stage_name, tool in stage.items() %}
+output "{{ stage_name }}_{{ tool.name }}_url" {
+  value = var.enable_{{ stage_name }}_{{ tool.name }} && length(module.{{ stage_name }}_{{ tool.name }}) > 0 ? module.{{ stage_name }}_{{ tool.name }}[0].service_url : ""
 }
+
+output "{{ stage_name }}_{{ tool.name }}_bucket" {
+  value = var.enable_{{ stage_name }}_{{ tool.name }} && length(module.{{ stage_name }}_{{ tool.name }}) > 0 ? module.{{ stage_name }}_{{ tool.name }}[0].bucket_name : ""
+}
+  {% endfor %}
+{% endfor %}
