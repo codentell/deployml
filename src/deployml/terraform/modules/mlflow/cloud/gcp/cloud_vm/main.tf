@@ -24,7 +24,7 @@ resource "google_compute_instance" "docker_vm" {
     access_config {
       # This block creates an ephemeral external IP address
     }
-  
+  }
 
   # Service account (optional, but good practice)
   service_account {
