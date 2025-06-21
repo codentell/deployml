@@ -13,7 +13,7 @@ resource "google_compute_instance" "docker_vm" {
 
   boot_disk {
     initialize_params {
-      image = image = "cos-cloud/cos-121-lts" # Or your preferred Linux distribution
+      image = "cos-cloud/cos-121-lts" # Or your preferred Linux distribution
       size = 10
       type = "pd-balanced"
     }

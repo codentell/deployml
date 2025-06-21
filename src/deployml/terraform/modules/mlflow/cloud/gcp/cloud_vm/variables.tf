@@ -8,7 +8,8 @@ variable "region" {
     description = "GCP region for deployment"
     default = "us-west1"
 
-}variable "zone" {
+}
+variable "zone" {
   description = "The GCP zone to deploy the VM in"
   type        = string
   default     = "us-west1-a"
