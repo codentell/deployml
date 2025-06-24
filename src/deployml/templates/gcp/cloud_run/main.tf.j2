@@ -66,8 +66,13 @@ module "{{ stage_name }}_{{ tool.name }}" {
   # Always pass artifact_bucket to all modules (needed for env vars)
   artifact_bucket = {% if create_artifact_bucket %}google_storage_bucket.mlflow_artifact.name{% else %}var.artifact_bucket{% endif %}
   
+  {% if tool.params.get("backend_store_uri", "") == "postgresql" %}
   backend_store_uri = module.cloud_sql_postgres.connection_string
   cloudsql_instance_annotation = module.cloud_sql_postgres.instance_connection_name
+  {% else %}
+  backend_store_uri = "{{ tool.params.get('backend_store_uri', '') }}"
+  cloudsql_instance_annotation = ""
+  {% endif %}
   
   {% for key, value in tool.params.items() %}
     {%- set resource_params = ["cpu_limit", "memory_limit", "cpu_request", "memory_request", "max_scale", "container_concurrency"] -%}
