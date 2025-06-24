@@ -17,3 +17,11 @@ TOOL_VARIABLES = {
         {"name": "image", "type": "string", "description": "FastAPI Docker image"},
     ]
 }
+
+ANIMAL_NAMES = [
+    "antelope", "badger", "beaver", "bison", "buffalo", "camel", "cheetah", "cougar", "coyote", "deer", "dingo", "elephant", "elk", "ferret", "fox", "gazelle", "giraffe", "gnu", "goat", "hippo", "hyena", "ibex", "jaguar", "kangaroo", "koala", "leopard", "lion", "llama", "lynx", "mink", "moose", "otter", "panda", "panther", "pig", "platypus", "porcupine", "puma", "rabbit", "raccoon", "ram", "rat", "reindeer", "rhinoceros", "sheep", "skunk", "sloth", "squirrel", "tiger", "walrus", "weasel", "wolf", "wombat", "yak", "zebra"
+]
+
+FALLBACK_WORDS = [
+    "mlflow", "model", "artifact", "experiment", "data", "pipeline", "deploy", "track", "ai", "ml", "cloud"
+]

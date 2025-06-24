@@ -1,0 +1,176 @@
+variable "project_id" {
+  description = "GCP project ID"
+  type        = string
+}
+
+variable "region" {
+  description = "GCP region"
+  type        = string
+}
+
+variable "zone" {
+  description = "GCP zone"
+  type        = string
+}
+
+# --- Added static variables for Cloud Run deployment ---
+variable "allow_public_access" {
+  description = "Allow public access to Cloud Run"
+  type        = bool
+  default     = true
+}
+
+variable "auto_approve" {
+  description = "Auto approve Terraform actions"
+  type        = bool
+  default     = false
+}
+
+variable "cpu_limit" {
+  description = "CPU limit for Cloud Run"
+  type        = string
+  default     = "2000m"
+}
+
+variable "memory_limit" {
+  description = "Memory limit for Cloud Run"
+  type        = string
+  default     = "2Gi"
+}
+
+variable "cpu_request" {
+  description = "CPU request for Cloud Run"
+  type        = string
+  default     = "1000m"
+}
+
+variable "memory_request" {
+  description = "Memory request for Cloud Run"
+  type        = string
+  default     = "1Gi"
+}
+
+variable "max_scale" {
+  description = "Max scale for Cloud Run"
+  type        = number
+  default     = 10
+}
+
+variable "container_concurrency" {
+  description = "Container concurrency for Cloud Run"
+  type        = number
+  default     = 80
+}
+
+variable "global_image" {
+  description = "Global image for MLflow"
+  type        = string
+  default     = ""
+}
+
+variable "db_type" {
+  description = "Database type"
+  type        = string
+  default     = "mysql"
+}
+
+variable "db_user" {
+  description = "Database user"
+  type        = string
+  default     = ""
+}
+
+variable "db_password" {
+  description = "Database password"
+  type        = string
+  default     = ""
+}
+
+variable "db_name" {
+  description = "Database name"
+  type        = string
+  default     = ""
+}
+
+variable "db_port" {
+  description = "Database port"
+  type        = string
+  default     = "3306"
+}
+
+variable "machine_type" {
+  description = "VM machine type"
+  type        = string
+  default     = "e2-medium"
+}
+
+variable "disk_size" {
+  description = "Boot disk size in GB"
+  type        = number
+  default     = 10
+}
+
+variable "disk_type" {
+  description = "Boot disk type"
+  type        = string
+  default     = "pd-balanced"
+}
+
+variable "image_family" {
+  description = "VM image family"
+  type        = string
+  default     = "cos-cloud/cos-121-lts"
+}
+
+variable "network" {
+  description = "Network name"
+  type        = string
+  default     = "default"
+}
+
+variable "allow_http_https" {
+  description = "Allow HTTP/HTTPS traffic"
+  type        = bool
+  default     = true
+}
+
+# Dynamic variables based on YAML config
+{%- set seen = [] -%}
+{% for stage in stack %}
+  {% for stage_name, tool in stage.items() %}
+    {% for key, value in tool.params.items() %}
+      {% if key not in seen %}
+        {%- set _ = seen.append(key) -%}
+        {%- if key not in [
+            "image", "allow_public_access", "auto_approve", "cpu_limit", "memory_limit",
+            "cpu_request", "memory_request", "max_scale", "container_concurrency",
+            "global_image", "db_type", "db_user", "db_password", "db_name", "db_port"
+        ] -%}
+variable "{{ key }}" {
+  description = "Parameter {{ key }}"
+  type        = string
+  default     = ""
+}
+        {%- endif -%}
+      {% endif %}
+      {% if key == "image" %}
+variable "{{ stage_name }}_{{ tool.name }}_image" {
+  description = "Custom image for {{ stage_name }}_{{ tool.name }}"
+  type        = string
+  default     = ""
+}
+      {% endif %}
+    {% endfor %}
+  {% endfor %}
+{% endfor %}
+
+# Control variables for module behavior
+{% for stage in stack %}
+  {% for stage_name, tool in stage.items() %}
+variable "enable_{{ stage_name }}_{{ tool.name }}" {
+  description = "Enable/disable {{ stage_name }}_{{ tool.name }} module"
+  type        = bool
+  default     = true
+}
+  {% endfor %}
+{% endfor %}

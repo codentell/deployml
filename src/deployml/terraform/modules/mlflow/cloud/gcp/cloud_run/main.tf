@@ -1,5 +1,7 @@
 # modules/mlflow/cloud/gcp/cloud_run/main.tf
 
+data "google_project" "current" {}
+
 # Storage bucket - only create if explicitly requested
 resource "google_storage_bucket" "artifact" {
   count         = var.create_bucket && var.artifact_bucket != "" ? 1 : 0
@@ -95,4 +97,15 @@ resource "google_cloud_run_service_iam_member" "public" {
   service  = google_cloud_run_service.mlflow[0].name
   role     = "roles/run.invoker"
   member   = "allUsers"
+}
+
+
+# Add to modules/mlflow/cloud/gcp/cloud_run/main.tf
+
+# Grant Cloud Run service account access to the artifact bucket
+resource "google_storage_bucket_iam_member" "mlflow_service_access" {
+  count  = var.create_bucket && var.artifact_bucket != "" ? 1 : 0
+  bucket = google_storage_bucket.artifact[0].name
+  role   = "roles/storage.objectAdmin"
+  member = "serviceAccount:${data.google_project.current.number}-compute@developer.gserviceaccount.com"
 }

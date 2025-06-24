@@ -17,7 +17,6 @@ stack:
       name: mlflow
       params: 
         image: gcr.io/mlops-intro-461805/mlflow/mlflow:latest
-        artifact_bucket: mlflow-artifact-bucket-mlops-intro-461805
   - model_registry:
       name: mlflow
       params: 

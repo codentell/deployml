@@ -5,11 +5,15 @@ import shutil
 import subprocess
 from deployml.utils.banner import display_banner
 from deployml.utils.menu import prompt, show_menu
-from deployml.utils.constants import TEMPLATE_DIR, TERRAFORM_DIR, TOOL_VARIABLES
+from deployml.utils.constants import TEMPLATE_DIR, TERRAFORM_DIR, TOOL_VARIABLES, ANIMAL_NAMES, FALLBACK_WORDS
 from deployml.enum.cloud_provider import CloudProvider
 from jinja2 import Environment, FileSystemLoader
 from pathlib import Path
 from typing import Optional
+import random
+import string
+from google.cloud import storage
+
 
 
 cli = typer.Typer()
@@ -145,6 +149,29 @@ def copy_modules_to_workspace(modules_dir: Path):
             shutil.copytree(module_path, dest_path)
             typer.echo(f"  ✅ Copied {module_path.name}")
 
+def bucket_exists(bucket_name, project_id):
+    client = storage.Client(project=project_id)
+    try:
+        client.get_bucket(bucket_name)
+        return True
+    except Exception:
+        return False
+    
+def generate_unique_bucket_name(base_name, project_id):
+    while True:
+        suffix = ''.join(random.choices(string.ascii_lowercase + string.digits, k=6))
+        new_name = f"{base_name}-{suffix}"
+        if not bucket_exists(new_name, project_id):
+            return new_name
+
+def generate_bucket_name(project_id):
+    # Use a random animal or fallback word
+    if random.random() < 0.7:
+        word = random.choice(ANIMAL_NAMES)
+    else:
+        word = random.choice(FALLBACK_WORDS)
+    suffix = ''.join(random.choices(string.ascii_lowercase + string.digits, k=4))
+    return f"{word}-bucket-{project_id}-{suffix}".replace('_', '-')
 
 @cli.command()
 def deploy(
@@ -159,6 +186,33 @@ def deploy(
         raise typer.Exit(code=1)
 
     config = yaml.safe_load(config_path.read_text())
+
+    # --- GCS bucket existence and unique name logic ---
+    cloud = config["provider"]["name"]
+    if cloud == "gcp":
+        project_id = config["provider"]["project_id"]
+        print(project_id)
+        # Only run if google-cloud-storage is available
+        # Find artifact_bucket in stack config
+        for stage in config.get("stack", []):
+            for stage_name, tool in stage.items():
+                print(stage_name, tool)
+                if stage_name == "artifact_tracking" and tool.get("name") == "mlflow":
+                    
+                    if "params" not in tool:
+                        tool["params"] = {}
+                    if not tool["params"].get("artifact_bucket"):
+                        new_bucket = generate_bucket_name(project_id)
+                        typer.echo(f"ℹ️  No bucket specified for artifact_tracking, using generated bucket name: {new_bucket}")
+                        tool["params"]["artifact_bucket"] = new_bucket
+                    else:
+                        base_bucket = tool["params"]["artifact_bucket"]
+                        if bucket_exists(base_bucket, project_id):
+                            unique_bucket = generate_unique_bucket_name(base_bucket, project_id)
+                            typer.echo(f"⚠️  Bucket '{base_bucket}' exists. Using unique bucket name: {unique_bucket}")
+                            tool["params"]["artifact_bucket"] = unique_bucket
+                        else:
+                            typer.echo(f"ℹ️  Using specified bucket name: {base_bucket}")
 
     workspace_name = (
         config.get("name") or 
@@ -180,18 +234,16 @@ def deploy(
     copy_modules_to_workspace(DEPLOYML_MODULES_DIR)
 
     
-    cloud = config["provider"]["name"]
-    
-    if cloud == "gcp":
-        project_id = config["provider"]["project_id"]
-    
     region = config["provider"]["region"]
     deployment_type = config["deployment"]["type"]
     stack = config["stack"]
 
+    print(stack)
+
     env = Environment(loader=FileSystemLoader(TEMPLATE_DIR))
-    main_template = env.get_template("main.tf.j2")
-    var_template = env.get_template("variables.tf.j2")
+    main_template = env.get_template(f"{cloud}/{deployment_type}/main.tf.j2")
+    var_template = env.get_template(f"{cloud}/{deployment_type}/variables.tf.j2")
+    tfvars_template = env.get_template(f"{cloud}/{deployment_type}/terraform.tfvars.j2")
 
     # Render templates
     main_tf = main_template.render(
@@ -200,53 +252,17 @@ def deploy(
         deployment_type=deployment_type
     )
     variables_tf = var_template.render(stack=stack, cloud=cloud)
+    tfvars_content = tfvars_template.render(
+        project_id=project_id,
+        region=region,
+        zone=config["provider"].get("zone", f"{region}-a"),  # Add zone for VM
+        stack=stack,
+        cloud=cloud
+    )
 
+    # Write files
     (DEPLOYML_TERRAFORM_DIR / "main.tf").write_text(main_tf)
     (DEPLOYML_TERRAFORM_DIR / "variables.tf").write_text(variables_tf)
-
-    # Build terraform.tfvars with all parameters
-    tfvars_dict = {
-        "project_id": project_id,
-        "region": region,
-    }
-    
-    # Add parameters from YAML config
-    resource_params = {"cpu_limit", "memory_limit", "cpu_request", "memory_request", "max_scale", "container_concurrency"}
-    
-    for stage in stack:
-        for stage_name, tool in stage.items():
-            # Enable this module by default
-            tfvars_dict[f"enable_{stage_name}_{tool['name']}"] = "true"
-            
-            for key, value in tool.get("params", {}).items():
-                # Skip the general 'image' parameter and resource params to avoid conflicts
-                if key != "image" and key not in resource_params:
-                    tfvars_dict[key] = value
-                
-                # Add per-module image variables
-                if key == "image":
-                    tfvars_dict[f"{stage_name}_{tool['name']}_image"] = value
-    
-    # Add defaults for optional variables
-    tfvars_dict.update({
-        "global_image": f"gcr.io/{project_id}/mlflow/mlflow:latest",
-        "allow_public_access": "true",
-        "auto_approve": "false",
-        "cpu_limit": "2000m",
-        "memory_limit": "2Gi", 
-        "cpu_request": "1000m",
-        "memory_request": "1Gi",
-        "max_scale": "10",
-        "container_concurrency": "80",
-        "db_type": "mysql",
-        "db_user": "",
-        "db_password": "",
-        "db_name": "",
-        "db_port": "3306",
-    })
-    
-    # Write terraform.tfvars
-    tfvars_content = "\n".join(f'{k} = "{v}"' for k, v in tfvars_dict.items())
     (DEPLOYML_TERRAFORM_DIR / "terraform.tfvars").write_text(tfvars_content)
 
     # Deploy

@@ -1,0 +1,26 @@
+project_id = "{{ project_id }}"
+region = "{{ region }}"
+zone = "{{ zone }}"
+
+# VM specific defaults
+machine_type = "e2-medium"
+disk_size = 10
+disk_type = "pd-balanced"
+image_family = "cos-cloud/cos-121-lts"
+
+# Network defaults
+network = "default"
+allow_http_https = true
+
+{% for stage in stack %}
+  {% for stage_name, tool in stage.items() %}
+enable_{{ stage_name }}_{{ tool.name }} = true
+    {% for key, value in tool.params.items() %}
+      {% if key == "image" %}
+{{ stage_name }}_{{ tool.name }}_image = "{{ value }}"
+      {% else %}
+{{ key }} = "{{ value }}"
+      {% endif %}
+    {% endfor %}
+  {% endfor %}
+{% endfor %}

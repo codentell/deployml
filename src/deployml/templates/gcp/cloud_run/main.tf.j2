@@ -7,6 +7,7 @@ provider "{% if cloud == 'gcp' %}google{% elif cloud == 'aws' %}aws{% else %}{{c
     {% endif %}
 }
 
+
 {% for stage in stack %}
   {% for stage_name, tool in stage.items() %}
 module "{{ stage_name }}_{{ tool.name }}" {
@@ -59,3 +60,4 @@ output "{{ stage_name }}_{{ tool.name }}_bucket" {
 }
   {% endfor %}
 {% endfor %}
+
