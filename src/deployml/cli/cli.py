@@ -258,9 +258,10 @@ def deploy(
         cloud=cloud, 
         stack=stack, 
         deployment_type=deployment_type,
-        create_artifact_bucket=create_artifact_bucket
+        create_artifact_bucket=create_artifact_bucket,
+        project_id=project_id
     )
-    variables_tf = var_template.render(stack=stack, cloud=cloud)
+    variables_tf = var_template.render(stack=stack, cloud=cloud, project_id=project_id)
     tfvars_content = tfvars_template.render(
         project_id=project_id,
         region=region,

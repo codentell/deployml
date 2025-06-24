@@ -22,4 +22,6 @@ stack:
       name: mlflow
       params: 
         image: gcr.io/mlops-intro-461805/mlflow/mlflow:latest
-        backend_store_uri: sqlite:///mlflow.db
+        backend_store_uri: postgresql
+        # backend_store_uri: sqlite:///mlflow.db
+        

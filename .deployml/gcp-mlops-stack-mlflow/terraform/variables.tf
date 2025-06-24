@@ -135,46 +135,102 @@ variable "allow_http_https" {
 }
 
 # Dynamic variables based on YAML config
-{%- set seen = [] -%}
-{% for stage in stack %}
-  {% for stage_name, tool in stage.items() %}
-    {% for key, value in tool.params.items() %}
-      {% if key not in seen %}
-        {%- set _ = seen.append(key) -%}
-        {%- if key not in [
-            "image", "allow_public_access", "auto_approve", "cpu_limit", "memory_limit",
-            "cpu_request", "memory_request", "max_scale", "container_concurrency",
-            "global_image", "db_type", "db_user", "db_password", "db_name", "db_port",
-            "create_artifact_bucket"
-        ] -%}
-variable "{{ key }}" {
-  description = "Parameter {{ key }}"
+  
+    
+      
+      
+variable "experiment_tracking_mlflow_image" {
+  description = "Custom image for experiment_tracking_mlflow"
   type        = string
   default     = ""
 }
-        {%- endif -%}
-      {% endif %}
-      {% if key == "image" %}
-variable "{{ stage_name }}_{{ tool.name }}_image" {
-  description = "Custom image for {{ stage_name }}_{{ tool.name }}"
+      
+    
+      variable "service_name" {
+  description = "Parameter service_name"
   type        = string
   default     = ""
 }
-      {% endif %}
-    {% endfor %}
-  {% endfor %}
-{% endfor %}
+      
+    
+      
+      
+    
+      
+      
+    
+  
+
+  
+    
+      
+      
+variable "artifact_tracking_mlflow_image" {
+  description = "Custom image for artifact_tracking_mlflow"
+  type        = string
+  default     = ""
+}
+      
+    
+      variable "artifact_bucket" {
+  description = "Parameter artifact_bucket"
+  type        = string
+  default     = ""
+}
+      
+    
+      
+      
+    
+  
+
+  
+    
+      
+      
+variable "model_registry_mlflow_image" {
+  description = "Custom image for model_registry_mlflow"
+  type        = string
+  default     = ""
+}
+      
+    
+      variable "backend_store_uri" {
+  description = "Parameter backend_store_uri"
+  type        = string
+  default     = ""
+}
+      
+    
+  
+
 
 # Control variables for module behavior
-{% for stage in stack %}
-  {% for stage_name, tool in stage.items() %}
-variable "enable_{{ stage_name }}_{{ tool.name }}" {
-  description = "Enable/disable {{ stage_name }}_{{ tool.name }} module"
+
+  
+variable "enable_experiment_tracking_mlflow" {
+  description = "Enable/disable experiment_tracking_mlflow module"
   type        = bool
   default     = true
 }
-  {% endfor %}
-{% endfor %}
+  
+
+  
+variable "enable_artifact_tracking_mlflow" {
+  description = "Enable/disable artifact_tracking_mlflow module"
+  type        = bool
+  default     = true
+}
+  
+
+  
+variable "enable_model_registry_mlflow" {
+  description = "Enable/disable model_registry_mlflow module"
+  type        = bool
+  default     = true
+}
+  
+
 
 variable "create_artifact_bucket" {
   description = "Whether to create the artifact bucket (true) or use an existing one (false)"

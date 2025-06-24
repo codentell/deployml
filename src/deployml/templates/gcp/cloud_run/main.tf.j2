@@ -20,6 +20,27 @@ provider "{% if cloud == 'gcp' %}google{% elif cloud == 'aws' %}aws{% else %}{{c
     {% endif %}
 }
 
+# Detect if PostgreSQL is needed
+{% set flags = {"needs_postgres": false} %}
+{% for stage in stack %}
+  {% for stage_name, tool in stage.items() %}
+    {% if tool.params.get("backend_store_uri", "") == "postgresql" %}
+      {% set _ = flags.update({"needs_postgres": true}) %}
+    {% endif %}
+  {% endfor %}
+{% endfor %}
+
+# Create Cloud SQL PostgreSQL instance if needed
+{% if flags.needs_postgres %}
+module "cloud_sql_postgres" {
+  source = "./modules/mlflow/cloud/gcp/cloud_sql_postgres"
+  project_id      = var.project_id
+  region          = var.region
+  db_instance_name = "mlflow-postgres-{{ project_id }}"
+  db_name         = "mlflow"
+  db_user         = "mlflow"
+}
+{% endif %}
 
 {% for stage in stack %}
   {% for stage_name, tool in stage.items() %}
@@ -45,16 +66,17 @@ module "{{ stage_name }}_{{ tool.name }}" {
   # Always pass artifact_bucket to all modules (needed for env vars)
   artifact_bucket = {% if create_artifact_bucket %}google_storage_bucket.mlflow_artifact.name{% else %}var.artifact_bucket{% endif %}
   
+  backend_store_uri = module.cloud_sql_postgres.connection_string
+  cloudsql_instance_annotation = module.cloud_sql_postgres.instance_connection_name
+  
   {% for key, value in tool.params.items() %}
     {%- set resource_params = ["cpu_limit", "memory_limit", "cpu_request", "memory_request", "max_scale", "container_concurrency"] -%}
-    {% if key == "backend_store_uri" %}
-  backend_store_uri = var.backend_store_uri != "" ? var.backend_store_uri : "${var.db_type}+pymysql://${var.db_user}:${var.db_password}@127.0.0.1:${var.db_port}/${var.db_name}"
-    {% elif key == "image" %}
-  image = var.{{ stage_name }}_{{ tool.name }}_image != "" ? var.{{ stage_name }}_{{ tool.name }}_image : var.global_image
+    {% if key == "image" %}
+      image = var.{{ stage_name }}_{{ tool.name }}_image != "" ? var.{{ stage_name }}_{{ tool.name }}_image : var.global_image
     {% elif key == "artifact_bucket" %}
-  # Skip - already handled above
-    {% elif key not in resource_params and key != "create_artifact_bucket" %}
-  {{ key }} = var.{{ key }}
+      # Skip - already handled above
+    {% elif key not in resource_params and key != "create_artifact_bucket" and key != "backend_store_uri" %}
+      {{ key }} = var.{{ key }}
     {% endif %}
   {% endfor %}
 }
@@ -80,6 +102,16 @@ output "mlflow_artifact_bucket" {
 {% else %}
 output "mlflow_artifact_bucket" {
   value = var.artifact_bucket
+}
+{% endif %}
+
+{% if flags.needs_postgres %}
+output "instance_connection_name" {
+  value = module.cloud_sql_postgres.instance_connection_name
+}
+output "postgresql_credentials" {
+  value = module.cloud_sql_postgres.postgresql_credentials
+  sensitive = true
 }
 {% endif %}
 

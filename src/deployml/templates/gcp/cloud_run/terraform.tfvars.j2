@@ -14,11 +14,11 @@ max_scale = 10
 container_concurrency = 80
 
 # Database defaults
-db_type = "mysql"
-db_user = ""
-db_password = ""
-db_name = ""
-db_port = "3306"
+db_type = "postgresql" 
+db_user = "mlflow"      # Set to match cloud_sql_postgres module
+db_password = ""        # Auto-generated
+db_name = "mlflow"      # Set to match cloud_sql_postgres module
+db_port = "5432"        
 
 {% for stage in stack %}
   {% for stage_name, tool in stage.items() %}
@@ -30,6 +30,8 @@ artifact_bucket = "{{ tool.params.get('artifact_bucket', '') }}"
 {{ stage_name }}_{{ tool.name }}_image = "{{ value }}"
       {% elif key == "bucket_exists" %}
 bucket_exists = {{ value | lower }}
+      {% elif key == "backend_store_uri" %}
+backend_store_uri = "{{ value }}"
       {% elif key not in ["cpu_limit", "memory_limit", "cpu_request", "memory_request", "max_scale", "container_concurrency", "artifact_bucket", "create_artifact_bucket"] %}
 {{ key }} = "{{ value }}"
       {% endif %}
