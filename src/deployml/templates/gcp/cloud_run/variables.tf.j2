@@ -144,7 +144,8 @@ variable "allow_http_https" {
         {%- if key not in [
             "image", "allow_public_access", "auto_approve", "cpu_limit", "memory_limit",
             "cpu_request", "memory_request", "max_scale", "container_concurrency",
-            "global_image", "db_type", "db_user", "db_password", "db_name", "db_port"
+            "global_image", "db_type", "db_user", "db_password", "db_name", "db_port",
+            "create_artifact_bucket"
         ] -%}
 variable "{{ key }}" {
   description = "Parameter {{ key }}"
@@ -174,3 +175,9 @@ variable "enable_{{ stage_name }}_{{ tool.name }}" {
 }
   {% endfor %}
 {% endfor %}
+
+variable "create_artifact_bucket" {
+  description = "Whether to create the artifact bucket (true) or use an existing one (false)"
+  type        = bool
+  default     = true
+}

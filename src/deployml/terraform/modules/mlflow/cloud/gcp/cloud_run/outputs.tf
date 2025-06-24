@@ -4,13 +4,13 @@ output "service_url" {
 }
 
 output "bucket_name" {
-  description = "Name of the created storage bucket"
-  value       = length(google_storage_bucket.artifact) > 0 ? google_storage_bucket.artifact[0].name : ""
+  description = "Name of the artifact storage bucket (provided or external)"
+  value       = var.artifact_bucket
 }
 
 output "bucket_url" {
-  description = "URL of the created storage bucket"
-  value       = length(google_storage_bucket.artifact) > 0 ? google_storage_bucket.artifact[0].url : ""
+  description = "URL of the artifact storage bucket (provided or external)"
+  value       = var.artifact_bucket != "" ? "gs://${var.artifact_bucket}" : ""
 }
 
 output "service_name" {

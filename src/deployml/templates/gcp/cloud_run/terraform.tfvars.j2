@@ -30,9 +30,11 @@ artifact_bucket = "{{ tool.params.get('artifact_bucket', '') }}"
 {{ stage_name }}_{{ tool.name }}_image = "{{ value }}"
       {% elif key == "bucket_exists" %}
 bucket_exists = {{ value | lower }}
-      {% elif key not in ["cpu_limit", "memory_limit", "cpu_request", "memory_request", "max_scale", "container_concurrency", "artifact_bucket"] %}
+      {% elif key not in ["cpu_limit", "memory_limit", "cpu_request", "memory_request", "max_scale", "container_concurrency", "artifact_bucket", "create_artifact_bucket"] %}
 {{ key }} = "{{ value }}"
       {% endif %}
     {% endfor %}
   {% endfor %}
-{% endfor %} 
+{% endfor %}
+
+create_artifact_bucket = {{ create_artifact_bucket | lower }} 

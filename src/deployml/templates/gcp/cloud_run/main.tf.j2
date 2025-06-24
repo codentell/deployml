@@ -1,3 +1,16 @@
+{% if create_artifact_bucket %}
+resource "google_storage_bucket" "mlflow_artifact" {
+  name          = var.artifact_bucket
+  location      = var.region
+  force_destroy = true
+
+  labels = {
+    component  = "mlflow-artifacts"
+    managed-by = "terraform"
+  }
+}
+{% endif %}
+
 provider "{% if cloud == 'gcp' %}google{% elif cloud == 'aws' %}aws{% else %}{{cloud}}{% endif%}" {
     {% if cloud == "gcp" %}
     project = var.project_id
@@ -19,7 +32,6 @@ module "{{ stage_name }}_{{ tool.name }}" {
   
   # Control what gets created based on the module purpose
   create_service = {% if stage_name == "experiment_tracking" %}true{% else %}false{% endif %}
-  create_bucket  = {% if stage_name == "artifact_tracking" %}true{% else %}false{% endif %}
   allow_public_access = var.allow_public_access
   
   # Resource configuration
@@ -31,7 +43,7 @@ module "{{ stage_name }}_{{ tool.name }}" {
   container_concurrency = var.container_concurrency
   
   # Always pass artifact_bucket to all modules (needed for env vars)
-  artifact_bucket = var.artifact_bucket
+  artifact_bucket = {% if create_artifact_bucket %}google_storage_bucket.mlflow_artifact.name{% else %}var.artifact_bucket{% endif %}
   
   {% for key, value in tool.params.items() %}
     {%- set resource_params = ["cpu_limit", "memory_limit", "cpu_request", "memory_request", "max_scale", "container_concurrency"] -%}
@@ -41,7 +53,7 @@ module "{{ stage_name }}_{{ tool.name }}" {
   image = var.{{ stage_name }}_{{ tool.name }}_image != "" ? var.{{ stage_name }}_{{ tool.name }}_image : var.global_image
     {% elif key == "artifact_bucket" %}
   # Skip - already handled above
-    {% elif key not in resource_params %}
+    {% elif key not in resource_params and key != "create_artifact_bucket" %}
   {{ key }} = var.{{ key }}
     {% endif %}
   {% endfor %}
@@ -60,4 +72,14 @@ output "{{ stage_name }}_{{ tool.name }}_bucket" {
 }
   {% endfor %}
 {% endfor %}
+
+{% if create_artifact_bucket %}
+output "mlflow_artifact_bucket" {
+  value = google_storage_bucket.mlflow_artifact.name
+}
+{% else %}
+output "mlflow_artifact_bucket" {
+  value = var.artifact_bucket
+}
+{% endif %}
 

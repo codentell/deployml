@@ -92,3 +92,9 @@ variable "container_concurrency" {
   description = "Maximum number of concurrent requests per container"
   default     = 80
 }
+
+variable "bucket_exists" {
+  type        = bool
+  description = "Whether the artifact bucket already exists. If true, do not attempt to create it."
+  default     = false
+}

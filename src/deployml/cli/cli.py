@@ -205,14 +205,15 @@ def deploy(
                         new_bucket = generate_bucket_name(project_id)
                         typer.echo(f"ℹ️  No bucket specified for artifact_tracking, using generated bucket name: {new_bucket}")
                         tool["params"]["artifact_bucket"] = new_bucket
+                        tool["params"]["create_artifact_bucket"] = True
                     else:
                         base_bucket = tool["params"]["artifact_bucket"]
                         if bucket_exists(base_bucket, project_id):
-                            unique_bucket = generate_unique_bucket_name(base_bucket, project_id)
-                            typer.echo(f"⚠️  Bucket '{base_bucket}' exists. Using unique bucket name: {unique_bucket}")
-                            tool["params"]["artifact_bucket"] = unique_bucket
+                            typer.echo(f"ℹ️  Using specified bucket name (already exists): {base_bucket}")
+                            tool["params"]["create_artifact_bucket"] = False
                         else:
                             typer.echo(f"ℹ️  Using specified bucket name: {base_bucket}")
+                            tool["params"]["create_artifact_bucket"] = True
 
     workspace_name = (
         config.get("name") or 
@@ -245,11 +246,19 @@ def deploy(
     var_template = env.get_template(f"{cloud}/{deployment_type}/variables.tf.j2")
     tfvars_template = env.get_template(f"{cloud}/{deployment_type}/terraform.tfvars.j2")
 
+    # Find if any tool in the stack has create_artifact_bucket set
+    create_artifact_bucket = False
+    for stage in stack:
+        for stage_name, tool in stage.items():
+            if tool.get("params", {}).get("create_artifact_bucket", False):
+                create_artifact_bucket = True
+
     # Render templates
     main_tf = main_template.render(
         cloud=cloud, 
         stack=stack, 
-        deployment_type=deployment_type
+        deployment_type=deployment_type,
+        create_artifact_bucket=create_artifact_bucket
     )
     variables_tf = var_template.render(stack=stack, cloud=cloud)
     tfvars_content = tfvars_template.render(
@@ -257,7 +266,8 @@ def deploy(
         region=region,
         zone=config["provider"].get("zone", f"{region}-a"),  # Add zone for VM
         stack=stack,
-        cloud=cloud
+        cloud=cloud,
+        create_artifact_bucket=create_artifact_bucket
     )
 
     # Write files

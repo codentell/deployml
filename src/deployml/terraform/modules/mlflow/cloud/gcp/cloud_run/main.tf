@@ -2,19 +2,6 @@
 
 data "google_project" "current" {}
 
-# Storage bucket - only create if explicitly requested
-resource "google_storage_bucket" "artifact" {
-  count         = var.create_bucket && var.artifact_bucket != "" ? 1 : 0
-  name          = var.artifact_bucket
-  location      = var.region
-  force_destroy = true
-  
-  labels = {
-    component = "mlflow-artifacts"
-    managed-by = "terraform"
-  }
-}
-
 # Cloud Run service - only create if explicitly requested
 resource "google_cloud_run_service" "mlflow" {
   count    = var.create_service && var.image != "" && var.service_name != "" ? 1 : 0
@@ -57,7 +44,7 @@ resource "google_cloud_run_service" "mlflow" {
           }
         }
         
-        # Artifact root - use bucket if created, otherwise local
+        # Artifact root - use bucket if provided, otherwise local
         env {
           name = "MLFLOW_DEFAULT_ARTIFACT_ROOT"
           value = var.artifact_bucket != "" ? "gs://${var.artifact_bucket}" : "/tmp/mlflow-artifacts"
@@ -99,13 +86,10 @@ resource "google_cloud_run_service_iam_member" "public" {
   member   = "allUsers"
 }
 
-
-# Add to modules/mlflow/cloud/gcp/cloud_run/main.tf
-
 # Grant Cloud Run service account access to the artifact bucket
 resource "google_storage_bucket_iam_member" "mlflow_service_access" {
-  count  = var.create_bucket && var.artifact_bucket != "" ? 1 : 0
-  bucket = google_storage_bucket.artifact[0].name
+  count  = var.artifact_bucket != "" ? 1 : 0
+  bucket = var.artifact_bucket
   role   = "roles/storage.objectAdmin"
   member = "serviceAccount:${data.google_project.current.number}-compute@developer.gserviceaccount.com"
 }
