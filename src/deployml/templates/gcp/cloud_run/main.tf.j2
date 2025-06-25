@@ -20,12 +20,12 @@ provider "{% if cloud == 'gcp' %}google{% elif cloud == 'aws' %}aws{% else %}{{c
     {% endif %}
 }
 
-# Detect if PostgreSQL is needed
-{% set flags = {"needs_postgres": false} %}
+# Detect if any stage needs PostgreSQL
+{% set flags = namespace(needs_postgres=false) %}
 {% for stage in stack %}
   {% for stage_name, tool in stage.items() %}
     {% if tool.params.get("backend_store_uri", "") == "postgresql" %}
-      {% set _ = flags.update({"needs_postgres": true}) %}
+      {% set flags.needs_postgres = true %}
     {% endif %}
   {% endfor %}
 {% endfor %}
@@ -36,7 +36,7 @@ module "cloud_sql_postgres" {
   source = "./modules/mlflow/cloud/gcp/cloud_sql_postgres"
   project_id      = var.project_id
   region          = var.region
-  db_instance_name = "mlflow-postgres-{{ project_id }}"
+  db_instance_name = "mlflow-postgres--{{ project_id }}"
   db_name         = "mlflow"
   db_user         = "mlflow"
 }
@@ -66,12 +66,17 @@ module "{{ stage_name }}_{{ tool.name }}" {
   # Always pass artifact_bucket to all modules (needed for env vars)
   artifact_bucket = {% if create_artifact_bucket %}google_storage_bucket.mlflow_artifact.name{% else %}var.artifact_bucket{% endif %}
   
-  {% if tool.params.get("backend_store_uri", "") == "postgresql" %}
+  {% if flags.needs_postgres %}
   backend_store_uri = module.cloud_sql_postgres.connection_string
   cloudsql_instance_annotation = module.cloud_sql_postgres.instance_connection_name
   {% else %}
-  backend_store_uri = "{{ tool.params.get('backend_store_uri', '') }}"
+  backend_store_uri = "{{ tool.params.get('backend_store_uri', 'sqlite:///mlflow.db') }}"
   cloudsql_instance_annotation = ""
+  {% endif %}
+  
+  use_postgres = {{ "true" if flags.needs_postgres else "false" }}
+  {% if flags.needs_postgres %}
+  depends_on = [module.cloud_sql_postgres]
   {% endif %}
   
   {% for key, value in tool.params.items() %}
@@ -80,7 +85,7 @@ module "{{ stage_name }}_{{ tool.name }}" {
       image = var.{{ stage_name }}_{{ tool.name }}_image != "" ? var.{{ stage_name }}_{{ tool.name }}_image : var.global_image
     {% elif key == "artifact_bucket" %}
       # Skip - already handled above
-    {% elif key not in resource_params and key != "create_artifact_bucket" and key != "backend_store_uri" %}
+    {% elif key not in resource_params and key != "create_artifact_bucket" and key != "backend_store_uri" and key != "use_postgres" %}
       {{ key }} = var.{{ key }}
     {% endif %}
   {% endfor %}

@@ -20,6 +20,19 @@ db_password = ""        # Auto-generated
 db_name = "mlflow"      # Set to match cloud_sql_postgres module
 db_port = "5432"        
 
+# Output backend_store_uri only once (global)
+{% set backend_uri = None %}
+{% for stage in stack %}
+  {% for stage_name, tool in stage.items() %}
+    {% if backend_uri is none and tool.params.get('backend_store_uri') %}
+      {% set backend_uri = tool.params.get('backend_store_uri') %}
+    {% endif %}
+  {% endfor %}
+{% endfor %}
+{% if backend_uri %}
+backend_store_uri = "{{ backend_uri }}"
+{% endif %}
+
 {% for stage in stack %}
   {% for stage_name, tool in stage.items() %}
     {% if stage_name == "artifact_tracking" %}
@@ -30,9 +43,7 @@ artifact_bucket = "{{ tool.params.get('artifact_bucket', '') }}"
 {{ stage_name }}_{{ tool.name }}_image = "{{ value }}"
       {% elif key == "bucket_exists" %}
 bucket_exists = {{ value | lower }}
-      {% elif key == "backend_store_uri" %}
-backend_store_uri = "{{ value }}"
-      {% elif key not in ["cpu_limit", "memory_limit", "cpu_request", "memory_request", "max_scale", "container_concurrency", "artifact_bucket", "create_artifact_bucket"] %}
+      {% elif key not in ["cpu_limit", "memory_limit", "cpu_request", "memory_request", "max_scale", "container_concurrency", "artifact_bucket", "create_artifact_bucket", "backend_store_uri"] %}
 {{ key }} = "{{ value }}"
       {% endif %}
     {% endfor %}

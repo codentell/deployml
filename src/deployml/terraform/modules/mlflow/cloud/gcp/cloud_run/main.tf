@@ -24,8 +24,7 @@ resource "google_cloud_run_service" "mlflow" {
       timeout_seconds       = 300
       
       containers {
-        image = var.image
-        
+        image = var.image        
         # Always set basic MLflow environment
         env {
           name  = "MLFLOW_SERVER_HOST"

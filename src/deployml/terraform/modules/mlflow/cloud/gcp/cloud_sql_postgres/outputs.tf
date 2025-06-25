@@ -23,6 +23,10 @@ output "instance_connection_name" {
   value = google_sql_database_instance.postgres.connection_name
 }
 
+output "connection_string_cloud_sql" {
+  value = "postgresql+psycopg2://${var.db_user}:${random_password.db_password.result}@/mlflow?host=/cloudsql/${google_sql_database_instance.postgres.connection_name}"
+}
+
 output "postgresql_credentials" {
   description = "All credentials and connection info for the Cloud SQL PostgreSQL instance."
   value = {

@@ -198,7 +198,6 @@ def deploy(
             for stage_name, tool in stage.items():
                 print(stage_name, tool)
                 if stage_name == "artifact_tracking" and tool.get("name") == "mlflow":
-                    
                     if "params" not in tool:
                         tool["params"] = {}
                     if not tool["params"].get("artifact_bucket"):
@@ -214,6 +213,9 @@ def deploy(
                         else:
                             typer.echo(f"ℹ️  Using specified bucket name: {base_bucket}")
                             tool["params"]["create_artifact_bucket"] = True
+                    # Set use_postgres param based on backend_store_uri
+                    backend_uri = tool["params"].get("backend_store_uri", "")
+                    tool["params"]["use_postgres"] = backend_uri.startswith("postgresql")
 
     workspace_name = (
         config.get("name") or 
@@ -240,6 +242,17 @@ def deploy(
     stack = config["stack"]
 
     print(stack)
+
+    # Ensure all stages use Cloud SQL if any stage needs it
+    needs_postgres = any(
+        tool.get("params", {}).get("backend_store_uri", "") == "postgresql"
+        for stage in stack for tool in stage.values()
+    )
+    if needs_postgres:
+        for stage in stack:
+            for tool in stage.values():
+                tool.setdefault("params", {})
+                tool["params"]["backend_store_uri"] = "postgresql"
 
     env = Environment(loader=FileSystemLoader(TEMPLATE_DIR))
     main_template = env.get_template(f"{cloud}/{deployment_type}/main.tf.j2")

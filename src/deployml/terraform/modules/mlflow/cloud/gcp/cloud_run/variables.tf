@@ -104,3 +104,9 @@ variable "cloudsql_instance_annotation" {
   default     = ""
   description = "Cloud SQL instance connection name for annotation."
 }
+
+variable "use_postgres" {
+  type        = bool
+  default     = false
+  description = "Whether to use PostgreSQL (Cloud SQL) as the backend. If false, use SQLite."
+}
