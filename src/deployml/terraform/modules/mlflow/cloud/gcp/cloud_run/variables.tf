@@ -92,3 +92,21 @@ variable "container_concurrency" {
   description = "Maximum number of concurrent requests per container"
   default     = 80
 }
+
+variable "bucket_exists" {
+  type        = bool
+  description = "Whether the artifact bucket already exists. If true, do not attempt to create it."
+  default     = false
+}
+
+variable "cloudsql_instance_annotation" {
+  type        = string
+  default     = ""
+  description = "Cloud SQL instance connection name for annotation."
+}
+
+variable "use_postgres" {
+  type        = bool
+  default     = false
+  description = "Whether to use PostgreSQL (Cloud SQL) as the backend. If false, use SQLite."
+}

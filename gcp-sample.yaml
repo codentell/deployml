@@ -8,18 +8,28 @@ deployment:
 stack:
   - experiment_tracking:
       name: mlflow
+      # name: wandb
       params:
         image: gcr.io/mlops-intro-461805/mlflow/mlflow:latest
+        # image: gcr.io/mlops-intro-461805/wandb/wandb:latest
+        # service_name: wandb-server 
         service_name: mlflow-server 
-        memory_limit: 1Gi  # Add this line
-        cpu_limit: 1000m   # Add this line
+        # memory_limit: 1Gi  # Add this line
+        # cpu_limit: 1000m   # Add this line
   - artifact_tracking:
       name: mlflow
+      # name: wandb
       params: 
         image: gcr.io/mlops-intro-461805/mlflow/mlflow:latest
-        artifact_bucket: mlflow-artifact-bucket-mlops-intro-461805
+        # image: gcr.io/mlops-intro-461805/wandb/wandb:latest
+        # artifact_bucket: mlflow-artifact-bucket-mlops-intro-461805-v1678
   - model_registry:
       name: mlflow
+      # name: wandb
       params: 
+        # image: gcr.io/mlops-intro-461805/wandb/wandb:latest
         image: gcr.io/mlops-intro-461805/mlflow/mlflow:latest
-        backend_store_uri: sqlite:///mlflow.db
+        backend_store_uri: postgresql
+        # backend_store_uri: sqlite
+        # backend_store_uri: postgresql
+        

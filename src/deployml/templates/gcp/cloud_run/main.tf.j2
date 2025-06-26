@@ -1,0 +1,139 @@
+{% if create_artifact_bucket %}
+{% for stage in stack %}
+  {% for stage_name, tool in stage.items() %}
+    {% if tool.params.get("artifact_bucket") %}
+resource "google_storage_bucket" "{{ stage_name }}_{{ tool.name }}_artifact" {
+  name          = var.artifact_bucket
+  location      = var.region
+  force_destroy = true
+
+  labels = {
+    component  = "{{ tool.name }}-artifacts"
+    managed-by = "terraform"
+    stage      = "{{ stage_name }}"
+  }
+}
+    {% endif %}
+  {% endfor %}
+{% endfor %}
+{% endif %}
+
+provider "{% if cloud == 'gcp' %}google{% elif cloud == 'aws' %}aws{% else %}{{cloud}}{% endif%}" {
+    {% if cloud == "gcp" %}
+    project = var.project_id
+    region = var.region
+    {% elif cloud == "aws" %}
+    region = var.region
+    {% endif %}
+}
+
+# Detect if any stage needs PostgreSQL
+{% set flags = namespace(needs_postgres=false, first_tool_name="") %}
+{% for stage in stack %}
+  {% for stage_name, tool in stage.items() %}
+    {% if tool.params.get("backend_store_uri", "") == "postgresql" %}
+      {% set flags.needs_postgres = true %}
+      {% if not flags.first_tool_name %}
+        {% set flags.first_tool_name = tool.name %}
+      {% endif %}
+    {% endif %}
+  {% endfor %}
+{% endfor %}
+
+# Create Cloud SQL PostgreSQL instance if needed
+{% if flags.needs_postgres %}
+module "cloud_sql_postgres" {
+  source = "./modules/{{ flags.first_tool_name }}/cloud/gcp/cloud_sql_postgres"
+  project_id      = var.project_id
+  region          = var.region
+  db_instance_name = "{{ flags.first_tool_name }}-postgres--{{ project_id }}"
+  db_name         = "{{ flags.first_tool_name }}"
+  db_user         = "{{ flags.first_tool_name }}"
+}
+{% endif %}
+
+{% for stage in stack %}
+  {% for stage_name, tool in stage.items() %}
+module "{{ stage_name }}_{{ tool.name }}" {
+  source = "./modules/{{ tool.name }}/cloud/{{ cloud }}/{{ deployment_type }}"
+  count  = var.enable_{{ stage_name }}_{{ tool.name }} ? 1 : 0
+  
+  project_id = var.project_id
+  region     = var.region
+  
+  # Control what gets created based on the module purpose
+  create_service = {% if stage_name == "experiment_tracking" %}true{% else %}false{% endif %}
+  allow_public_access = var.allow_public_access
+  
+  # Resource configuration
+  cpu_limit = var.cpu_limit
+  memory_limit = var.memory_limit
+  cpu_request = var.cpu_request
+  memory_request = var.memory_request
+  max_scale = var.max_scale
+  container_concurrency = var.container_concurrency
+  
+  # Dynamic artifact bucket reference
+  artifact_bucket = {% if create_artifact_bucket and tool.params.get("artifact_bucket") %}google_storage_bucket.{{ stage_name }}_{{ tool.name }}_artifact.name{% else %}var.artifact_bucket{% endif %}
+  
+  {% if flags.needs_postgres %}
+  backend_store_uri = module.cloud_sql_postgres.connection_string
+  cloudsql_instance_annotation = module.cloud_sql_postgres.instance_connection_name
+  {% else %}
+  backend_store_uri = "{{ tool.params.get('backend_store_uri', 'sqlite:///' + tool.name + '.db') }}"
+  cloudsql_instance_annotation = ""
+  {% endif %}
+  
+  use_postgres = {{ "true" if flags.needs_postgres else "false" }}
+  {% if flags.needs_postgres %}
+  depends_on = [module.cloud_sql_postgres]
+  {% endif %}
+  
+  {% for key, value in tool.params.items() %}
+    {%- set resource_params = ["cpu_limit", "memory_limit", "cpu_request", "memory_request", "max_scale", "container_concurrency"] -%}
+    {% if key == "image" %}
+      image = var.{{ stage_name }}_{{ tool.name }}_image != "" ? var.{{ stage_name }}_{{ tool.name }}_image : var.global_image
+    {% elif key == "artifact_bucket" %}
+      # Skip - already handled above
+    {% elif key not in resource_params and key != "create_artifact_bucket" and key != "backend_store_uri" and key != "use_postgres" %}
+      {{ key }} = var.{{ key }}
+    {% endif %}
+  {% endfor %}
+}
+  {% endfor %}
+{% endfor %}
+
+{% for stage in stack %}
+  {% for stage_name, tool in stage.items() %}
+output "{{ stage_name }}_{{ tool.name }}_url" {
+  value = var.enable_{{ stage_name }}_{{ tool.name }} && length(module.{{ stage_name }}_{{ tool.name }}) > 0 ? module.{{ stage_name }}_{{ tool.name }}[0].service_url : ""
+}
+
+output "{{ stage_name }}_{{ tool.name }}_bucket" {
+  value = var.enable_{{ stage_name }}_{{ tool.name }} && length(module.{{ stage_name }}_{{ tool.name }}) > 0 ? module.{{ stage_name }}_{{ tool.name }}[0].bucket_name : ""
+}
+  {% endfor %}
+{% endfor %}
+
+{% if create_artifact_bucket %}
+{% for stage in stack %}
+  {% for stage_name, tool in stage.items() %}
+    {% if tool.params.get("artifact_bucket") %}
+output "{{ stage_name }}_{{ tool.name }}_artifact_bucket" {
+  value = google_storage_bucket.{{ stage_name }}_{{ tool.name }}_artifact.name
+}
+    {% endif %}
+  {% endfor %}
+{% endfor %}
+{% endif %}
+
+{% if flags.needs_postgres %}
+output "instance_connection_name" {
+  value = module.cloud_sql_postgres.instance_connection_name
+}
+output "postgresql_credentials" {
+  value = module.cloud_sql_postgres.postgresql_credentials
+  sensitive = true
+}
+{% endif %}
+

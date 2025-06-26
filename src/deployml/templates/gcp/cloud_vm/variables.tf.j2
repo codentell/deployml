@@ -1,0 +1,87 @@
+variable "project_id" {
+  description = "GCP project ID"
+  type        = string
+}
+
+variable "region" {
+  description = "GCP region"
+  type        = string
+}
+
+variable "zone" {
+  description = "GCP zone"
+  type        = string
+}
+
+variable "machine_type" {
+  description = "VM machine type"
+  type        = string
+  default     = "e2-medium"
+}
+
+variable "disk_size" {
+  description = "Boot disk size in GB"
+  type        = number
+  default     = 10
+}
+
+variable "disk_type" {
+  description = "Boot disk type"
+  type        = string
+  default     = "pd-balanced"
+}
+
+variable "image_family" {
+  description = "VM image family"
+  type        = string
+  default     = "cos-cloud/cos-121-lts"
+}
+
+variable "network" {
+  description = "Network name"
+  type        = string
+  default     = "default"
+}
+
+variable "allow_http_https" {
+  description = "Allow HTTP/HTTPS traffic"
+  type        = bool
+  default     = true
+}
+
+# Dynamic variables based on YAML config
+{%- set seen = [] -%}
+{% for stage in stack %}
+  {% for stage_name, tool in stage.items() %}
+    {% for key, value in tool.params.items() %}
+      {% if key not in seen %}
+        {%- set _ = seen.append(key) -%}
+        {%- if key != "image" -%}
+variable "{{ key }}" {
+  description = "Parameter {{ key }}"
+  type        = string
+  default     = ""
+}
+        {%- endif -%}
+      {% endif %}
+      {% if key == "image" %}
+variable "{{ stage_name }}_{{ tool.name }}_image" {
+  description = "Custom image for {{ stage_name }}_{{ tool.name }}"
+  type        = string
+  default     = ""
+}
+      {% endif %}
+    {% endfor %}
+  {% endfor %}
+{% endfor %}
+
+# Control variables for module behavior
+{% for stage in stack %}
+  {% for stage_name, tool in stage.items() %}
+variable "enable_{{ stage_name }}_{{ tool.name }}" {
+  description = "Enable/disable {{ stage_name }}_{{ tool.name }} module"
+  type        = bool
+  default     = true
+}
+  {% endfor %}
+{% endfor %}
