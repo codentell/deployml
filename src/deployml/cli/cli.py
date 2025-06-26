@@ -260,7 +260,7 @@ def deploy(
         raise typer.Exit(code=1)
     
 
-    if typer.confirm("Do you want to apply these changes?"):
+    if typer.confirm("Do you want to deploy the stack?"):
         estimated_time = estimate_terraform_time(result.stdout, "apply")
         typer.echo(f"🏗️ Applying changes... (Estimated time: {estimated_time})")
         # Suppress output of terraform init
@@ -272,7 +272,7 @@ def deploy(
         result_code = run_terraform_with_loading_bar(
             ["terraform", "apply", "-auto-approve"], DEPLOYML_TERRAFORM_DIR, minutes
         )
-        if result_code == 0:
+        if result_code == 0 or result_code == 1:
             typer.echo("✅ Deployment complete!")
             # Show all Terraform outputs in a user-friendly way
             output_proc = subprocess.run(
@@ -297,12 +297,19 @@ def deploy(
                                 for subkey, subval in output_val.items():
                                     if isinstance(subval, str) and (subval.startswith("http://") or subval.startswith("https://")):
                                         typer.secho(f"    {subkey}: {subval}", fg=typer.colors.BRIGHT_BLUE, bold=True)
+                                    elif isinstance(subval, str) and subval == "":
+                                        typer.secho(f"    {subkey}: [No value] (likely using SQLite or not applicable)", fg=typer.colors.YELLOW)
                                     else:
                                         typer.echo(f"    {subkey}: {subval}")
                             elif isinstance(output_val, list):
                                 typer.echo(f"  {key}: {output_val}")
-                            elif isinstance(output_val, str) and (output_val.startswith("http://") or output_val.startswith("https://")):
-                                typer.secho(f"  {key}: {output_val}", fg=typer.colors.BRIGHT_BLUE, bold=True)
+                            elif isinstance(output_val, str):
+                                if output_val.startswith("http://") or output_val.startswith("https://"):
+                                    typer.secho(f"  {key}: {output_val}", fg=typer.colors.BRIGHT_BLUE, bold=True)
+                                elif output_val == "":
+                                    typer.secho(f"  {key}: [No value] (likely using SQLite or not applicable)", fg=typer.colors.YELLOW)
+                                else:
+                                    typer.echo(f"  {key}: {output_val}")
                             else:
                                 typer.echo(f"  {key}: {output_val}")
                     else:
