@@ -15,8 +15,8 @@ import string
 from google.cloud import storage
 # Import refactored utility functions
 from deployml.utils.helpers import (
-    check_command, check, check_gcp_auth, copy_modules_to_workspace,
-    bucket_exists, generate_unique_bucket_name, generate_bucket_name,
+    check, check_gcp_auth, copy_modules_to_workspace,
+    bucket_exists, generate_bucket_name,
     estimate_terraform_time, cleanup_cloud_sql_resources, cleanup_terraform_files,
     run_terraform_with_loading_bar
 )
@@ -128,71 +128,19 @@ def terraform(
         output_dir = Path(output_dir)
 
 
-@cli.command()
-def deploy(
-    config_path: Path = typer.Option(
-        ..., "--config-path", "-c", help="Path to YAML config file"
-    )
-):
+# --- Modular deployment handlers ---
+def handle_gcp_cloud_run(config, paths):
     """
-    Deploy infrastructure based on a YAML configuration file.
+    Handler for GCP Cloud Run deployments.
     """
-    if not config_path.exists():
-        typer.echo(f"❌ Config file not found: {config_path}")
-        raise typer.Exit(code=1)
-
-    config = yaml.safe_load(config_path.read_text())
-
-    # --- GCS bucket existence and unique name logic ---
-    cloud = config["provider"]["name"]
-    if cloud == "gcp":
-        project_id = config["provider"]["project_id"]
-        # Only run if google-cloud-storage is available
-        # Find artifact_bucket in stack config
-        for stage in config.get("stack", []):
-            for stage_name, tool in stage.items():
-                if stage_name == "artifact_tracking" and tool.get("name") == "mlflow":
-                    if "params" not in tool:
-                        tool["params"] = {}
-                    if not tool["params"].get("artifact_bucket"):
-                        new_bucket = generate_bucket_name(project_id)
-                        typer.echo(f" No bucket specified for artifact_tracking, using generated bucket name: {new_bucket}")
-                        tool["params"]["artifact_bucket"] = new_bucket
-                        tool["params"]["create_artifact_bucket"] = True
-                    else:
-                        base_bucket = tool["params"]["artifact_bucket"]
-                        if bucket_exists(base_bucket, project_id):
-                            typer.echo(f"Using specified bucket name (already exists): {base_bucket}")
-                            tool["params"]["create_artifact_bucket"] = False
-                        else:
-                            typer.echo(f"Using specified bucket name: {base_bucket}")
-                            tool["params"]["create_artifact_bucket"] = True
-                    # Set use_postgres param based on backend_store_uri
-                    backend_uri = tool["params"].get("backend_store_uri", "")
-                    tool["params"]["use_postgres"] = backend_uri.startswith("postgresql")
-
-    workspace_name = (
-        config.get("name") or 
-        "development"
-    )
-
-    DEPLOYML_DIR = Path.cwd() / ".deployml" / workspace_name
-    DEPLOYML_TERRAFORM_DIR = DEPLOYML_DIR / "terraform"
-    DEPLOYML_MODULES_DIR = DEPLOYML_DIR / "terraform" / "modules"
-
-    typer.echo(f"📁 Using workspace: {workspace_name}")
-    typer.echo(f"📍 Workspace path: {DEPLOYML_DIR}")
-
-    DEPLOYML_TERRAFORM_DIR.mkdir(parents=True, exist_ok=True)
-    DEPLOYML_MODULES_DIR.mkdir(parents=True, exist_ok=True)
-
-    typer.echo("📦 Copying module templates...")
-    copy_modules_to_workspace(DEPLOYML_MODULES_DIR)
-
+    DEPLOYML_TERRAFORM_DIR = paths["DEPLOYML_TERRAFORM_DIR"]
+    DEPLOYML_MODULES_DIR = paths["DEPLOYML_MODULES_DIR"]
+    TEMPLATE_DIR = paths["TEMPLATE_DIR"]
+    project_id = config["provider"]["project_id"]
     region = config["provider"]["region"]
     deployment_type = config["deployment"]["type"]
     stack = config["stack"]
-
+    
     # Ensure all stages use Cloud SQL if any stage needs it
     needs_postgres = any(
         tool.get("params", {}).get("backend_store_uri", "") == "postgresql"
@@ -205,9 +153,9 @@ def deploy(
                 tool["params"]["backend_store_uri"] = "postgresql"
 
     env = Environment(loader=FileSystemLoader(TEMPLATE_DIR))
-    main_template = env.get_template(f"{cloud}/{deployment_type}/main.tf.j2")
-    var_template = env.get_template(f"{cloud}/{deployment_type}/variables.tf.j2")
-    tfvars_template = env.get_template(f"{cloud}/{deployment_type}/terraform.tfvars.j2")
+    main_template = env.get_template(f"gcp/{deployment_type}/main.tf.j2")
+    var_template = env.get_template(f"gcp/{deployment_type}/variables.tf.j2")
+    tfvars_template = env.get_template(f"gcp/{deployment_type}/terraform.tfvars.j2")
 
     # Find if any tool in the stack has create_artifact_bucket set
     create_artifact_bucket = False
@@ -218,19 +166,19 @@ def deploy(
 
     # Render templates
     main_tf = main_template.render(
-        cloud=cloud, 
+        cloud="gcp", 
         stack=stack, 
         deployment_type=deployment_type,
         create_artifact_bucket=create_artifact_bucket,
         project_id=project_id
     )
-    variables_tf = var_template.render(stack=stack, cloud=cloud, project_id=project_id)
+    variables_tf = var_template.render(stack=stack, cloud="gcp", project_id=project_id)
     tfvars_content = tfvars_template.render(
         project_id=project_id,
         region=region,
         zone=config["provider"].get("zone", f"{region}-a"),  # Add zone for VM
         stack=stack,
-        cloud=cloud,
+        cloud="gcp",
         create_artifact_bucket=create_artifact_bucket
     )
 
@@ -240,7 +188,7 @@ def deploy(
     (DEPLOYML_TERRAFORM_DIR / "terraform.tfvars").write_text(tfvars_content)
 
     # Deploy
-    typer.echo(f"🚀 Deploying {config['name']} to {cloud}...")
+    typer.echo(f"🚀 Deploying {config['name']} to gcp...")
 
     if not check_gcp_auth():
         typer.echo("🔐 Authenticating with GCP...")
@@ -249,7 +197,6 @@ def deploy(
     subprocess.run(["gcloud", "config", "set", "project", project_id], cwd=DEPLOYML_TERRAFORM_DIR)
     
     typer.echo("📋 Initializing Terraform...")
-    # Suppress output of terraform init
     subprocess.run(["terraform", "init"], cwd=DEPLOYML_TERRAFORM_DIR, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     
     typer.echo("📊 Planning deployment...")
@@ -259,22 +206,17 @@ def deploy(
         typer.echo(f"❌ Terraform plan failed: {result.stderr}")
         raise typer.Exit(code=1)
     
-
     if typer.confirm("Do you want to deploy the stack?"):
         estimated_time = estimate_terraform_time(result.stdout, "apply")
         typer.echo(f"🏗️ Applying changes... (Estimated time: {estimated_time})")
-        # Suppress output of terraform init
         subprocess.run(["terraform", "init"], cwd=DEPLOYML_TERRAFORM_DIR, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        # Parse estimated minutes from string (e.g., '~20 minutes ...')
-        import re as _re
-        match = _re.search(r"~(\d+)", estimated_time)
+        match = re.search(r"~(\d+)", estimated_time)
         minutes = int(match.group(1)) if match else 5
         result_code = run_terraform_with_loading_bar(
             ["terraform", "apply", "-auto-approve"], DEPLOYML_TERRAFORM_DIR, minutes
         )
         if result_code == 0 or result_code == 1:
             typer.echo("✅ Deployment complete!")
-            # Show all Terraform outputs in a user-friendly way
             output_proc = subprocess.run(
                 ["terraform", "output", "-json"],
                 cwd=DEPLOYML_TERRAFORM_DIR,
@@ -288,7 +230,6 @@ def deploy(
                         typer.echo("\n📦 DeployML Outputs:")
                         for key, value in outputs.items():
                             is_sensitive = value.get("sensitive", False)
-                            output_type = value.get("type")
                             output_val = value.get("value")
                             if is_sensitive:
                                 typer.secho(f"  {key}: [SENSITIVE] (value hidden)", fg=typer.colors.YELLOW)
@@ -323,6 +264,89 @@ def deploy(
             raise typer.Exit(code=1)
     else:
         typer.echo("❌ Deployment cancelled")
+
+def handle_gcp_cloud_vm(config, paths):
+    """
+    Handler for GCP Cloud VM deployments (placeholder).
+    """
+    pass
+
+DEPLOYMENT_HANDLERS = {
+    ("gcp", "cloud_run"): handle_gcp_cloud_run,
+    ("gcp", "cloud_vm"): handle_gcp_cloud_vm,
+}
+
+@cli.command()
+def deploy(
+    config_path: Path = typer.Option(
+        ..., "--config-path", "-c", help="Path to YAML config file"
+    )
+):
+    """
+    Deploy infrastructure based on a YAML configuration file.
+    """
+    display_banner("DeployML Stack Deployment")
+    if not config_path.exists():
+        typer.echo(f"❌ Config file not found: {config_path}")
+        raise typer.Exit(code=1)
+
+    config = yaml.safe_load(config_path.read_text())
+
+    # --- GCS bucket existence and unique name logic ---
+    cloud = config["provider"]["name"]
+    if cloud == "gcp":
+        project_id = config["provider"]["project_id"]
+        for stage in config.get("stack", []):
+            for stage_name, tool in stage.items():
+                if stage_name == "artifact_tracking" and tool.get("name") == "mlflow":
+                    if "params" not in tool:
+                        tool["params"] = {}
+                    if not tool["params"].get("artifact_bucket"):
+                        new_bucket = generate_bucket_name(project_id)
+                        typer.echo(f" No bucket specified for artifact_tracking, using generated bucket name: {new_bucket}")
+                        tool["params"]["artifact_bucket"] = new_bucket
+                        tool["params"]["create_artifact_bucket"] = True
+                    else:
+                        base_bucket = tool["params"]["artifact_bucket"]
+                        if bucket_exists(base_bucket, project_id):
+                            typer.echo(f"Using specified bucket name (already exists): {base_bucket}")
+                            tool["params"]["create_artifact_bucket"] = False
+                        else:
+                            typer.echo(f"Using specified bucket name: {base_bucket}")
+                            tool["params"]["create_artifact_bucket"] = True
+                    backend_uri = tool["params"].get("backend_store_uri", "")
+                    tool["params"]["use_postgres"] = backend_uri.startswith("postgresql")
+
+    workspace_name = (
+        config.get("name") or 
+        "development"
+    )
+
+    DEPLOYML_DIR = Path.cwd() / ".deployml" / workspace_name
+    DEPLOYML_TERRAFORM_DIR = DEPLOYML_DIR / "terraform"
+    DEPLOYML_MODULES_DIR = DEPLOYML_DIR / "terraform" / "modules"
+
+    typer.echo(f"📁 Using workspace: {workspace_name}")
+    typer.echo(f"📍 Workspace path: {DEPLOYML_DIR}")
+
+    DEPLOYML_TERRAFORM_DIR.mkdir(parents=True, exist_ok=True)
+    DEPLOYML_MODULES_DIR.mkdir(parents=True, exist_ok=True)
+
+    typer.echo("📦 Copying module templates...")
+    copy_modules_to_workspace(DEPLOYML_MODULES_DIR)
+
+    deployment_type = config["deployment"]["type"]
+    handler = DEPLOYMENT_HANDLERS.get((cloud, deployment_type))
+    if handler:
+        handler(config, {
+            "DEPLOYML_DIR": DEPLOYML_DIR,
+            "DEPLOYML_TERRAFORM_DIR": DEPLOYML_TERRAFORM_DIR,
+            "DEPLOYML_MODULES_DIR": DEPLOYML_MODULES_DIR,
+            "TEMPLATE_DIR": TEMPLATE_DIR,
+        })
+    else:
+        typer.echo(f"❌ Unsupported deployment type: {deployment_type} for cloud: {cloud}")
+        raise typer.Exit(code=1)
 
 
 @cli.command()
