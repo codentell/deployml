@@ -5,7 +5,13 @@ import shutil
 import subprocess
 from deployml.utils.banner import display_banner
 from deployml.utils.menu import prompt, show_menu
-from deployml.utils.constants import TEMPLATE_DIR, TERRAFORM_DIR, TOOL_VARIABLES, ANIMAL_NAMES, FALLBACK_WORDS
+from deployml.utils.constants import (
+    TEMPLATE_DIR,
+    TERRAFORM_DIR,
+    TOOL_VARIABLES,
+    ANIMAL_NAMES,
+    FALLBACK_WORDS,
+)
 from deployml.enum.cloud_provider import CloudProvider
 from jinja2 import Environment, FileSystemLoader
 from pathlib import Path
@@ -13,12 +19,20 @@ from typing import Optional
 import random
 import string
 from google.cloud import storage
+
 # Import refactored utility functions
 from deployml.utils.helpers import (
-    check_command, check, check_gcp_auth, copy_modules_to_workspace,
-    bucket_exists, generate_unique_bucket_name, generate_bucket_name,
-    estimate_terraform_time, cleanup_cloud_sql_resources, cleanup_terraform_files,
-    run_terraform_with_loading_bar
+    check_command,
+    check,
+    check_gcp_auth,
+    copy_modules_to_workspace,
+    bucket_exists,
+    generate_unique_bucket_name,
+    generate_bucket_name,
+    estimate_terraform_time,
+    cleanup_cloud_sql_resources,
+    cleanup_terraform_files,
+    run_terraform_with_loading_bar,
 )
 
 import re
@@ -60,7 +74,8 @@ def doctor():
         )
     elif gcp_installed:
         typer.secho(
-            "\n⚠️ GCP CLI ⛈️  installed but not authenticated", fg=typer.colors.YELLOW
+            "\n⚠️ GCP CLI ⛈️  installed but not authenticated",
+            fg=typer.colors.YELLOW,
         )
     else:
         typer.secho("\n❌ GCP CLI ⛈️  not installed", fg=typer.colors.RED)
@@ -89,7 +104,99 @@ def generate():
     display_banner("Welcome to DeployML Stack Generator!")
     typer.echo("\n")
     name = prompt("MLOps Stack name", "stack")
-    provider = show_menu("☁️  Select Provider", CloudProvider, CloudProvider.LOCAL)
+    provider = show_menu("☁️  Select Provider", CloudProvider, CloudProvider.GCP)
+
+    # Import DeploymentType here to avoid circular imports
+    from deployml.enum.deployment_type import DeploymentType
+
+    deployment_type = show_menu(
+        "🚀 Select Deployment Type", DeploymentType, DeploymentType.CLOUD_RUN
+    )
+
+    # Get provider-specific details
+    if provider == "gcp":
+        project_id = prompt("GCP Project ID", "your-project-id")
+        region = prompt("GCP Region", "us-west1")
+        zone = (
+            prompt("GCP Zone", f"{region}-a")
+            if deployment_type == "cloud_vm"
+            else ""
+        )
+
+    # Generate YAML configuration
+    config = {
+        "name": name,
+        "provider": {
+            "name": provider,
+            "project_id": project_id if provider == "gcp" else "",
+            "region": region if provider == "gcp" else "",
+        },
+    }
+
+    # Add zone for VM deployments
+    if deployment_type == "cloud_vm" and provider == "gcp":
+        config["provider"]["zone"] = zone
+
+    config["deployment"] = {"type": deployment_type}
+
+    # Add default stack configuration
+    config["stack"] = [
+        {
+            "experiment_tracking": {
+                "name": "mlflow",
+                "params": {
+                    "service_name": f"{name}-mlflow-server",
+                    "allow_public_access": True,
+                },
+            }
+        },
+        {
+            "artifact_tracking": {
+                "name": "mlflow",
+                "params": {
+                    "artifact_bucket": (
+                        f"{name}-artifacts-{project_id}"
+                        if provider == "gcp"
+                        else ""
+                    ),
+                    "create_bucket": True,
+                },
+            }
+        },
+        {
+            "model_registry": {
+                "name": "mlflow",
+                "params": {"backend_store_uri": "sqlite:///mlflow.db"},
+            }
+        },
+    ]
+
+    # Add VM-specific parameters for cloud_vm deployment
+    if deployment_type == "cloud_vm":
+        config["stack"][0]["experiment_tracking"]["params"].update(
+            {
+                "vm_name": f"{name}-mlflow-vm",
+                "machine_type": "e2-medium",
+                "disk_size_gb": 20,
+                "mlflow_port": 5000,
+            }
+        )
+
+    # Write configuration to file
+    config_filename = f"{name}.yaml"
+    import yaml
+
+    with open(config_filename, "w") as f:
+        yaml.dump(config, f, default_flow_style=False, sort_keys=False)
+
+    typer.secho(
+        f"\n✅ Configuration saved to: {config_filename}", fg=typer.colors.GREEN
+    )
+    typer.echo(f"\nTo deploy this configuration, run:")
+    typer.secho(
+        f"  deployml deploy --config-path {config_filename}",
+        fg=typer.colors.BRIGHT_BLUE,
+    )
 
 
 @cli.command()
@@ -120,7 +227,9 @@ def terraform(
             config = yaml.safe_load(f)
 
     except Exception as e:
-        typer.secho(f"❌ Failed to load configuration: {e}", fg=typer.colors.RED)
+        typer.secho(
+            f"❌ Failed to load configuration: {e}", fg=typer.colors.RED
+        )
 
     if not output_dir:
         output_dir = Path.cwd() / ".deployml" / "terraform" / config["name"]
@@ -151,30 +260,54 @@ def deploy(
         # Find artifact_bucket in stack config
         for stage in config.get("stack", []):
             for stage_name, tool in stage.items():
-                if stage_name == "artifact_tracking" and tool.get("name") == "mlflow":
+                if (
+                    stage_name == "artifact_tracking"
+                    and tool.get("name") == "mlflow"
+                ):
                     if "params" not in tool:
                         tool["params"] = {}
                     if not tool["params"].get("artifact_bucket"):
                         new_bucket = generate_bucket_name(project_id)
-                        typer.echo(f" No bucket specified for artifact_tracking, using generated bucket name: {new_bucket}")
+                        typer.echo(
+                            f" No bucket specified for artifact_tracking, using generated bucket name: {new_bucket}"
+                        )
                         tool["params"]["artifact_bucket"] = new_bucket
-                        tool["params"]["create_artifact_bucket"] = True
+                        # Only set create_artifact_bucket if neither is present
+                        if (
+                            "create_bucket" not in tool["params"]
+                            and "create_artifact_bucket" not in tool["params"]
+                        ):
+                            tool["params"]["create_artifact_bucket"] = True
                     else:
                         base_bucket = tool["params"]["artifact_bucket"]
                         if bucket_exists(base_bucket, project_id):
-                            typer.echo(f"Using specified bucket name (already exists): {base_bucket}")
-                            tool["params"]["create_artifact_bucket"] = False
+                            typer.echo(
+                                f"Using specified bucket name (already exists): {base_bucket}"
+                            )
+                            # Only set create_artifact_bucket if neither is present
+                            if (
+                                "create_bucket" not in tool["params"]
+                                and "create_artifact_bucket"
+                                not in tool["params"]
+                            ):
+                                tool["params"]["create_artifact_bucket"] = False
                         else:
-                            typer.echo(f"Using specified bucket name: {base_bucket}")
-                            tool["params"]["create_artifact_bucket"] = True
+                            typer.echo(
+                                f"Using specified bucket name: {base_bucket}"
+                            )
+                            if (
+                                "create_bucket" not in tool["params"]
+                                and "create_artifact_bucket"
+                                not in tool["params"]
+                            ):
+                                tool["params"]["create_artifact_bucket"] = True
                     # Set use_postgres param based on backend_store_uri
                     backend_uri = tool["params"].get("backend_store_uri", "")
-                    tool["params"]["use_postgres"] = backend_uri.startswith("postgresql")
+                    tool["params"]["use_postgres"] = backend_uri.startswith(
+                        "postgresql"
+                    )
 
-    workspace_name = (
-        config.get("name") or 
-        "development"
-    )
+    workspace_name = config.get("name") or "development"
 
     DEPLOYML_DIR = Path.cwd() / ".deployml" / workspace_name
     DEPLOYML_TERRAFORM_DIR = DEPLOYML_DIR / "terraform"
@@ -196,7 +329,8 @@ def deploy(
     # Ensure all stages use Cloud SQL if any stage needs it
     needs_postgres = any(
         tool.get("params", {}).get("backend_store_uri", "") == "postgresql"
-        for stage in stack for tool in stage.values()
+        for stage in stack
+        for tool in stage.values()
     )
     if needs_postgres:
         for stage in stack:
@@ -206,8 +340,12 @@ def deploy(
 
     env = Environment(loader=FileSystemLoader(TEMPLATE_DIR))
     main_template = env.get_template(f"{cloud}/{deployment_type}/main.tf.j2")
-    var_template = env.get_template(f"{cloud}/{deployment_type}/variables.tf.j2")
-    tfvars_template = env.get_template(f"{cloud}/{deployment_type}/terraform.tfvars.j2")
+    var_template = env.get_template(
+        f"{cloud}/{deployment_type}/variables.tf.j2"
+    )
+    tfvars_template = env.get_template(
+        f"{cloud}/{deployment_type}/terraform.tfvars.j2"
+    )
 
     # Find if any tool in the stack has create_artifact_bucket set
     create_artifact_bucket = False
@@ -217,21 +355,34 @@ def deploy(
                 create_artifact_bucket = True
 
     # Render templates
-    main_tf = main_template.render(
-        cloud=cloud, 
-        stack=stack, 
-        deployment_type=deployment_type,
-        create_artifact_bucket=create_artifact_bucket,
-        project_id=project_id
+    if deployment_type == "cloud_vm":
+        main_tf = main_template.render(
+            cloud=cloud,
+            stack=stack,
+            deployment_type=deployment_type,
+            create_artifact_bucket=create_artifact_bucket,
+            project_id=project_id,
+            region=region,
+            zone=config["provider"].get("zone", f"{region}-a"),
+        )
+    else:
+        main_tf = main_template.render(
+            cloud=cloud,
+            stack=stack,
+            deployment_type=deployment_type,
+            create_artifact_bucket=create_artifact_bucket,
+            project_id=project_id,
+        )
+    variables_tf = var_template.render(
+        stack=stack, cloud=cloud, project_id=project_id
     )
-    variables_tf = var_template.render(stack=stack, cloud=cloud, project_id=project_id)
     tfvars_content = tfvars_template.render(
         project_id=project_id,
         region=region,
         zone=config["provider"].get("zone", f"{region}-a"),  # Add zone for VM
         stack=stack,
         cloud=cloud,
-        create_artifact_bucket=create_artifact_bucket
+        create_artifact_bucket=create_artifact_bucket,
     )
 
     # Write files
@@ -244,33 +395,56 @@ def deploy(
 
     if not check_gcp_auth():
         typer.echo("🔐 Authenticating with GCP...")
-        subprocess.run(["gcloud", "auth", "application-default", "login"], cwd=DEPLOYML_TERRAFORM_DIR)
-    
-    subprocess.run(["gcloud", "config", "set", "project", project_id], cwd=DEPLOYML_TERRAFORM_DIR)
-    
+        subprocess.run(
+            ["gcloud", "auth", "application-default", "login"],
+            cwd=DEPLOYML_TERRAFORM_DIR,
+        )
+
+    subprocess.run(
+        ["gcloud", "config", "set", "project", project_id],
+        cwd=DEPLOYML_TERRAFORM_DIR,
+    )
+
     typer.echo("📋 Initializing Terraform...")
     # Suppress output of terraform init
-    subprocess.run(["terraform", "init"], cwd=DEPLOYML_TERRAFORM_DIR, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    
+    subprocess.run(
+        ["terraform", "init"],
+        cwd=DEPLOYML_TERRAFORM_DIR,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
     typer.echo("📊 Planning deployment...")
-    result = subprocess.run(["terraform", "plan"], cwd=DEPLOYML_TERRAFORM_DIR, capture_output=True, text=True)
-    
+    result = subprocess.run(
+        ["terraform", "plan"],
+        cwd=DEPLOYML_TERRAFORM_DIR,
+        capture_output=True,
+        text=True,
+    )
+
     if result.returncode != 0:
         typer.echo(f"❌ Terraform plan failed: {result.stderr}")
         raise typer.Exit(code=1)
-    
 
     if typer.confirm("Do you want to deploy the stack?"):
         estimated_time = estimate_terraform_time(result.stdout, "apply")
         typer.echo(f"🏗️ Applying changes... (Estimated time: {estimated_time})")
         # Suppress output of terraform init
-        subprocess.run(["terraform", "init"], cwd=DEPLOYML_TERRAFORM_DIR, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.run(
+            ["terraform", "init"],
+            cwd=DEPLOYML_TERRAFORM_DIR,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
         # Parse estimated minutes from string (e.g., '~20 minutes ...')
         import re as _re
+
         match = _re.search(r"~(\d+)", estimated_time)
         minutes = int(match.group(1)) if match else 5
         result_code = run_terraform_with_loading_bar(
-            ["terraform", "apply", "-auto-approve"], DEPLOYML_TERRAFORM_DIR, minutes
+            ["terraform", "apply", "-auto-approve"],
+            DEPLOYML_TERRAFORM_DIR,
+            minutes,
         )
         if result_code == 0 or result_code == 1:
             typer.echo("✅ Deployment complete!")
@@ -279,7 +453,7 @@ def deploy(
                 ["terraform", "output", "-json"],
                 cwd=DEPLOYML_TERRAFORM_DIR,
                 capture_output=True,
-                text=True
+                text=True,
             )
             if output_proc.returncode == 0:
                 try:
@@ -291,23 +465,47 @@ def deploy(
                             output_type = value.get("type")
                             output_val = value.get("value")
                             if is_sensitive:
-                                typer.secho(f"  {key}: [SENSITIVE] (value hidden)", fg=typer.colors.YELLOW)
+                                typer.secho(
+                                    f"  {key}: [SENSITIVE] (value hidden)",
+                                    fg=typer.colors.YELLOW,
+                                )
                             elif isinstance(output_val, dict):
                                 typer.echo(f"  {key}:")
                                 for subkey, subval in output_val.items():
-                                    if isinstance(subval, str) and (subval.startswith("http://") or subval.startswith("https://")):
-                                        typer.secho(f"    {subkey}: {subval}", fg=typer.colors.BRIGHT_BLUE, bold=True)
-                                    elif isinstance(subval, str) and subval == "":
-                                        typer.secho(f"    {subkey}: [No value] (likely using SQLite or not applicable)", fg=typer.colors.YELLOW)
+                                    if isinstance(subval, str) and (
+                                        subval.startswith("http://")
+                                        or subval.startswith("https://")
+                                    ):
+                                        typer.secho(
+                                            f"    {subkey}: {subval}",
+                                            fg=typer.colors.BRIGHT_BLUE,
+                                            bold=True,
+                                        )
+                                    elif (
+                                        isinstance(subval, str) and subval == ""
+                                    ):
+                                        typer.secho(
+                                            f"    {subkey}: [No value] (likely using SQLite or not applicable)",
+                                            fg=typer.colors.YELLOW,
+                                        )
                                     else:
                                         typer.echo(f"    {subkey}: {subval}")
                             elif isinstance(output_val, list):
                                 typer.echo(f"  {key}: {output_val}")
                             elif isinstance(output_val, str):
-                                if output_val.startswith("http://") or output_val.startswith("https://"):
-                                    typer.secho(f"  {key}: {output_val}", fg=typer.colors.BRIGHT_BLUE, bold=True)
+                                if output_val.startswith(
+                                    "http://"
+                                ) or output_val.startswith("https://"):
+                                    typer.secho(
+                                        f"  {key}: {output_val}",
+                                        fg=typer.colors.BRIGHT_BLUE,
+                                        bold=True,
+                                    )
                                 elif output_val == "":
-                                    typer.secho(f"  {key}: [No value] (likely using SQLite or not applicable)", fg=typer.colors.YELLOW)
+                                    typer.secho(
+                                        f"  {key}: [No value] (likely using SQLite or not applicable)",
+                                        fg=typer.colors.YELLOW,
+                                    )
                                 else:
                                     typer.echo(f"  {key}: {output_val}")
                             else:
@@ -345,13 +543,10 @@ def destroy(
         raise typer.Exit(code=1)
 
     config = yaml.safe_load(config_path.read_text())
-    
+
     # Determine workspace name (same logic as deploy)
-    workspace_name = (
-        config.get("name") or 
-        "default"
-    )
-    
+    workspace_name = config.get("name") or "default"
+
     # Find the workspace
     DEPLOYML_DIR = Path.cwd() / ".deployml" / workspace_name
     DEPLOYML_TERRAFORM_DIR = DEPLOYML_DIR / "terraform"
@@ -359,7 +554,9 @@ def destroy(
 
     if not DEPLOYML_TERRAFORM_DIR.exists():
         typer.echo(f"⚠️ No workspace found for {workspace_name}")
-        typer.echo("Nothing to destroy - infrastructure may already be cleaned up.")
+        typer.echo(
+            "Nothing to destroy - infrastructure may already be cleaned up."
+        )
         return
 
     # Extract project info
@@ -373,37 +570,40 @@ def destroy(
     typer.echo(f"📁 Workspace: {DEPLOYML_DIR}")
     typer.echo(f"🌐 Project: {project_id}")
     typer.echo("This will permanently delete all resources!")
-        
+
     if not typer.confirm("Are you sure you want to destroy all resources?"):
         typer.echo("❌ Destroy cancelled")
         return
 
     try:
         typer.echo(f"💥 Destroying infrastructure...")
-        
+
         # Set GCP project
-        subprocess.run(["gcloud", "config", "set", "project", project_id], cwd=DEPLOYML_TERRAFORM_DIR)
-        
+        subprocess.run(
+            ["gcloud", "config", "set", "project", project_id],
+            cwd=DEPLOYML_TERRAFORM_DIR,
+        )
+
         # Check if we have Cloud SQL resources and clean them up first
         plan_result = subprocess.run(
-            ["terraform", "plan", "-destroy"], 
-            cwd=DEPLOYML_TERRAFORM_DIR, 
-            capture_output=True, 
-            text=True
+            ["terraform", "plan", "-destroy"],
+            cwd=DEPLOYML_TERRAFORM_DIR,
+            capture_output=True,
+            text=True,
         )
-        
+
         if "google_sql_database_instance" in plan_result.stdout:
             cleanup_cloud_sql_resources(DEPLOYML_TERRAFORM_DIR, project_id)
-        
+
         # Build destroy command
         cmd = ["terraform", "destroy", "--auto-approve"]
-        
+
         # Run destroy
         result = subprocess.run(cmd, cwd=DEPLOYML_TERRAFORM_DIR, check=False)
-        
+
         if result.returncode == 0:
             typer.echo("✅ Infrastructure destroyed successfully!")
-            
+
             if clean_workspace:
                 typer.echo("🧹 Cleaning workspace...")
                 shutil.rmtree(DEPLOYML_DIR)
@@ -413,7 +613,7 @@ def destroy(
         else:
             typer.echo(f"❌ Destroy failed: {result.stderr}")
             raise typer.Exit(code=1)
-            
+
     except Exception as e:
         typer.echo(f"❌ Error during destroy: {e}")
         raise typer.Exit(code=1)

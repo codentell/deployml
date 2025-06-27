@@ -51,6 +51,18 @@ variable "disk_size_gb" {
   default = 20
 }
 
+variable "disk_type" {
+  type = string
+  description = "Boot disk type"
+  default = "pd-balanced"
+}
+
+variable "image_family" {
+  type = string
+  description = "VM image family"
+  default = "debian-cloud/debian-12"
+}
+
 variable "artifact_bucket" {
     type = string
     description = "GCS bucket for storing MLflow artifacts"
@@ -102,6 +114,24 @@ variable "network" {
 variable "subnetwork" {
   type = string
   description = "VPC subnetwork name"
+  default = ""
+}
+
+variable "allow_http_https" {
+  type = bool
+  description = "Allow HTTP/HTTPS traffic"
+  default = true
+}
+
+variable "use_postgres" {
+  type = bool
+  description = "Whether to use PostgreSQL backend"
+  default = false
+}
+
+variable "cloudsql_instance_annotation" {
+  type = string
+  description = "Cloud SQL instance connection name"
   default = ""
 }
 

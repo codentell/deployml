@@ -2,25 +2,106 @@ project_id = "{{ project_id }}"
 region = "{{ region }}"
 zone = "{{ zone }}"
 
-# VM specific defaults
-machine_type = "e2-medium"
-disk_size = 10
-disk_type = "pd-balanced"
-image_family = "cos-cloud/cos-121-lts"
-
-# Network defaults
-network = "default"
-allow_http_https = true
-
+# Control variables for module behavior
 {% for stage in stack %}
   {% for stage_name, tool in stage.items() %}
 enable_{{ stage_name }}_{{ tool.name }} = true
+  {% endfor %}
+{% endfor %}
+
+# Dynamic parameter assignment from YAML config
+{%- set defined = [
+  "project_id", "region", "zone", "create_service", "create_bucket", "service_name", "vm_name", "machine_type", "disk_size_gb", "disk_type", "image_family", "artifact_bucket", "backend_store_uri", "image", "allow_public_access", "mlflow_port", "enable_https", "service_account_email", "network", "subnetwork", "allow_http_https", "use_postgres", "cloudsql_instance_annotation", "tags", "metadata", "startup_script"
+] -%}
+{%- set seen = [] -%}
+{% for stage in stack %}
+  {% for stage_name, tool in stage.items() %}
     {% for key, value in tool.params.items() %}
-      {% if key == "image" %}
-{{ stage_name }}_{{ tool.name }}_image = "{{ value }}"
-      {% else %}
+      {% if key not in seen %}
+        {%- set _ = seen.append(key) -%}
+        {% if key in ["create_service", "create_bucket", "allow_public_access", "allow_http_https", "enable_https", "use_postgres"] %}
+{{ key }} = {{ "true" if value else "false" }}
+        {% elif key in ["disk_size_gb", "mlflow_port"] %}
+{{ key }} = {{ value }}
+        {% elif key == "tags" %}
+{{ key }} = {{ value }}
+        {% elif key == "metadata" %}
+{{ key }} = {{ value }}
+        {% else %}
 {{ key }} = "{{ value }}"
+        {% endif %}
       {% endif %}
     {% endfor %}
   {% endfor %}
 {% endfor %}
+
+# Set defaults only if not already set in YAML config
+{% if "create_service" not in seen %}
+create_service = true
+{% endif %}
+{% if "create_bucket" not in seen %}
+create_bucket = false
+{% endif %}
+{% if "service_name" not in seen %}
+service_name = "mlflow-server"
+{% endif %}
+{% if "vm_name" not in seen %}
+vm_name = "mlflow-vm"
+{% endif %}
+{% if "machine_type" not in seen %}
+machine_type = "e2-medium"
+{% endif %}
+{% if "disk_size_gb" not in seen %}
+disk_size_gb = 20
+{% endif %}
+{% if "disk_type" not in seen %}
+disk_type = "pd-balanced"
+{% endif %}
+{% if "image_family" not in seen %}
+image_family = "debian-cloud/debian-12"
+{% endif %}
+{% if "artifact_bucket" not in seen %}
+artifact_bucket = ""
+{% endif %}
+{% if "backend_store_uri" not in seen %}
+backend_store_uri = ""
+{% endif %}
+{% if "image" not in seen %}
+image = ""
+{% endif %}
+{% if "allow_public_access" not in seen %}
+allow_public_access = true
+{% endif %}
+{% if "mlflow_port" not in seen %}
+mlflow_port = 5000
+{% endif %}
+{% if "enable_https" not in seen %}
+enable_https = false
+{% endif %}
+{% if "service_account_email" not in seen %}
+service_account_email = ""
+{% endif %}
+{% if "network" not in seen %}
+network = "default"
+{% endif %}
+{% if "subnetwork" not in seen %}
+subnetwork = ""
+{% endif %}
+{% if "allow_http_https" not in seen %}
+allow_http_https = true
+{% endif %}
+{% if "use_postgres" not in seen %}
+use_postgres = false
+{% endif %}
+{% if "cloudsql_instance_annotation" not in seen %}
+cloudsql_instance_annotation = ""
+{% endif %}
+{% if "tags" not in seen %}
+tags = ["mlflow-server", "http-server", "https-server"]
+{% endif %}
+{% if "metadata" not in seen %}
+metadata = {}
+{% endif %}
+{% if "startup_script" not in seen %}
+startup_script = ""
+{% endif %}
