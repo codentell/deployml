@@ -24,4 +24,22 @@ variable "db_user" {
   type        = string
   description = "Database username"
   default     = "mlflow"
+}
+
+variable "gcp_service_list" {
+  description = "The list of APIs necessary for MLflow with Cloud SQL"
+  type        = list(string)
+  default = [
+    "cloudresourcemanager.googleapis.com",
+    "serviceusage.googleapis.com",
+    "compute.googleapis.com",                    # For VM instances
+    "storage-api.googleapis.com",               # For Google Cloud Storage
+    "storage-component.googleapis.com",         # Storage component API
+    "sqladmin.googleapis.com",                  # Cloud SQL Admin API (essential)
+    "sql-component.googleapis.com",             # Cloud SQL component API
+    "servicenetworking.googleapis.com",         # For private service connections
+    "cloudkms.googleapis.com",                  # For encryption keys (if using CMEK)
+    "monitoring.googleapis.com",                # For Cloud SQL monitoring
+    "logging.googleapis.com",                   # For Cloud SQL logging
+  ]
 } 

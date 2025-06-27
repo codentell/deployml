@@ -25,3 +25,20 @@ ANIMAL_NAMES = [
 FALLBACK_WORDS = [
     "mlflow", "model", "artifact", "experiment", "data", "pipeline", "deploy", "track", "ai", "ml", "cloud"
 ]
+
+REQUIRED_GCP_APIS = [
+    "run.googleapis.com",
+    "iam.googleapis.com",
+    "cloudresourcemanager.googleapis.com",
+    "serviceusage.googleapis.com",
+    "compute.googleapis.com",
+    "storage-api.googleapis.com",
+    "storage-component.googleapis.com",
+    "sqladmin.googleapis.com",
+    "sql-component.googleapis.com",
+    "servicenetworking.googleapis.com",
+    "cloudkms.googleapis.com",
+    "monitoring.googleapis.com",
+    "logging.googleapis.com",
+    "artifactregistry.googleapis.com",
+]

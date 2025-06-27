@@ -110,3 +110,23 @@ variable "use_postgres" {
   default     = false
   description = "Whether to use PostgreSQL (Cloud SQL) as the backend. If false, use SQLite."
 }
+
+variable "gcp_service_list" {
+  description = "The list of APIs necessary for MLflow with Cloud Run"
+  type        = list(string)
+  default = [
+    "run.googleapis.com",                      # Cloud Run
+    "iam.googleapis.com",                      # IAM
+    "cloudresourcemanager.googleapis.com",
+    "serviceusage.googleapis.com",
+    "compute.googleapis.com",
+    "storage-api.googleapis.com",              # Google Cloud Storage
+    "storage-component.googleapis.com",        # Storage component API
+    "sqladmin.googleapis.com",                 # Cloud SQL Admin API (if using Cloud SQL)
+    "sql-component.googleapis.com",            # Cloud SQL component API (if using Cloud SQL)
+    "servicenetworking.googleapis.com",        # For private service connections (if using Cloud SQL)
+    "cloudkms.googleapis.com",                 # For encryption keys (if using CMEK)
+    "monitoring.googleapis.com",               # For monitoring
+    "logging.googleapis.com",                  # For logging
+  ]
+}

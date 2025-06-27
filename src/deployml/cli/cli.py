@@ -11,6 +11,7 @@ from deployml.utils.constants import (
     TOOL_VARIABLES,
     ANIMAL_NAMES,
     FALLBACK_WORDS,
+    REQUIRED_GCP_APIS,
 )
 from deployml.enum.cloud_provider import CloudProvider
 from jinja2 import Environment, FileSystemLoader
@@ -41,11 +42,11 @@ import json
 
 cli = typer.Typer()
 
-
 @cli.command()
 def doctor():
     """
     Run system checks for required tools and authentication for DeployML.
+    Also checks if all required GCP APIs are enabled if GCP CLI is installed and authenticated.
     """
     typer.echo("\n📋 DeployML Doctor Summary:\n")
 
@@ -72,6 +73,28 @@ def doctor():
         typer.secho(
             "\n✅ GCP CLI ☁️  installed and authenticated", fg=typer.colors.GREEN
         )
+        # Check enabled GCP APIs
+        project_id = typer.prompt("Enter your GCP Project ID to check enabled APIs", default="", show_default=False)
+        if project_id:
+            typer.echo(f"\n🔎 Checking enabled APIs for project: {project_id} ...")
+            result = subprocess.run(
+                [
+                    "gcloud", "services", "list", "--enabled", "--project", project_id, "--format=value(config.name)"
+                ],
+                capture_output=True, text=True
+            )
+            if result.returncode != 0:
+                typer.echo("❌ Failed to list enabled APIs.")
+            else:
+                enabled_apis = set(result.stdout.strip().splitlines())
+                missing_apis = [api for api in REQUIRED_GCP_APIS if api not in enabled_apis]
+                if not missing_apis:
+                    typer.secho("✅ All required GCP APIs are enabled.", fg=typer.colors.GREEN)
+                else:
+                    typer.secho("⚠️  The following required APIs are NOT enabled:", fg=typer.colors.YELLOW)
+                    for api in missing_apis:
+                        typer.echo(f"  - {api}")
+                    typer.echo("You can enable them with: deployml init --provider gcp --project-id <PROJECT_ID>")
     elif gcp_installed:
         typer.secho(
             "\n⚠️ GCP CLI ⛈️  installed but not authenticated",
@@ -625,6 +648,36 @@ def status():
     Check the deployment status of the current workspace.
     """
     typer.echo("Checking deployment status...")
+
+
+@cli.command()
+def init(
+    provider: str = typer.Option(..., "--provider", "-p", help="Cloud provider: gcp, aws, or azure"),
+    project_id: str = typer.Option("", "--project-id", "-j", help="Project ID (for GCP)"),
+):
+    """
+    Initialize cloud project by enabling required APIs/services before deployment.
+    """
+    if provider == "gcp":
+        if not project_id:
+            typer.echo("❌ --project-id is required for GCP.")
+            raise typer.Exit(code=1)
+        typer.echo(f"🔑 Enabling required GCP APIs for project: {project_id} ...")
+        result = subprocess.run([
+            "gcloud", "services", "enable", *REQUIRED_GCP_APIS, "--project", project_id
+        ])
+        if result.returncode == 0:
+            typer.echo("✅ All required GCP APIs are enabled.")
+        else:
+            typer.echo("❌ Failed to enable one or more GCP APIs.")
+            raise typer.Exit(code=1)
+    elif provider == "aws":
+        typer.echo("No API enablement required for AWS. Ensure IAM permissions are set.")
+    elif provider == "azure":
+        typer.echo("No API enablement required for most Azure services. Register providers if needed.")
+    else:
+        typer.echo(f"❌ Unknown provider: {provider}")
+        raise typer.Exit(code=1)
 
 
 def main():

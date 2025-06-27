@@ -9,6 +9,15 @@ poetry run deployml doctor
 poetry run deployml
 ```
 
+Examples:
+
+```bash
+poetry run deployml init --provider gcp --project-id <PROJECT_ID>
+poetry run deployml deploy -c gcp-sample.yaml
+```
+
+
+
 
 docker build --platform=linux/amd64 -t gcr.io/mlops-intro-461805/mlflow/mlflow:latest .
 

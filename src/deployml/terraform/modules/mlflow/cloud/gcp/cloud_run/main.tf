@@ -1,5 +1,12 @@
 # modules/mlflow/cloud/gcp/cloud_run/main.tf
 
+resource "google_project_service" "required" {
+  for_each           = toset(var.gcp_service_list)
+  project            = var.project_id
+  service            = each.value
+  disable_on_destroy = false
+}
+
 data "google_project" "current" {}
 
 # Cloud Run service - only create if explicitly requested
@@ -8,6 +15,7 @@ resource "google_cloud_run_service" "mlflow" {
   name     = var.service_name
   location = var.region
   project  = var.project_id
+  depends_on = [google_project_service.required]
 
   template {
     metadata {
