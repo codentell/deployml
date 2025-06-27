@@ -1,3 +1,4 @@
+# --- Project and Region Configuration ---
 variable "project_id" {
   description = "GCP project ID"
   type        = string
@@ -15,16 +16,11 @@ variable "zone" {
   default     = "us-west2-a"
 }
 
+# --- Service Configuration ---
 variable "create_service" {
   description = "Whether to create the MLflow service"
   type        = bool
   default     = true
-}
-
-variable "create_bucket" {
-  description = "Whether to create the artifact storage bucket"
-  type        = bool
-  default     = false
 }
 
 variable "service_name" {
@@ -33,6 +29,13 @@ variable "service_name" {
   default     = "mlflow-server"
 }
 
+variable "create_bucket" {
+  description = "Whether to create the artifact storage bucket"
+  type        = bool
+  default     = false
+}
+
+# --- VM Configuration ---
 variable "vm_name" {
   description = "Name for the VM instance"
   type        = string
@@ -63,6 +66,7 @@ variable "image_family" {
   default     = "debian-cloud/debian-12"
 }
 
+# --- MLflow Configuration ---
 variable "artifact_bucket" {
   description = "GCS bucket for storing MLflow artifacts"
   type        = string
@@ -81,28 +85,35 @@ variable "image" {
   default     = ""
 }
 
-variable "allow_public_access" {
-  description = "Whether to allow public access to MLflow UI"
-  type        = bool
-  default     = true
-}
-
 variable "mlflow_port" {
   description = "Port for MLflow server"
   type        = number
   default     = 5000
 }
 
-variable "enable_https" {
-  description = "Whether to enable HTTPS for MLflow"
+variable "use_postgres" {
+  description = "Whether to use PostgreSQL backend"
   type        = bool
   default     = false
 }
 
-variable "service_account_email" {
-  description = "Custom service account email (optional)"
+variable "cloudsql_instance_annotation" {
+  description = "Cloud SQL instance connection name"
   type        = string
   default     = ""
+}
+
+# --- Network and Security ---
+variable "allow_public_access" {
+  description = "Whether to allow public access to MLflow UI"
+  type        = bool
+  default     = true
+}
+
+variable "enable_https" {
+  description = "Whether to enable HTTPS for MLflow"
+  type        = bool
+  default     = false
 }
 
 variable "network" {
@@ -123,24 +134,20 @@ variable "allow_http_https" {
   default     = true
 }
 
-variable "use_postgres" {
-  description = "Whether to use PostgreSQL backend"
-  type        = bool
-  default     = false
-}
-
-variable "cloudsql_instance_annotation" {
-  description = "Cloud SQL instance connection name"
-  type        = string
-  default     = ""
-}
-
 variable "tags" {
   description = "Network tags for the VM"
   type        = list(string)
   default     = ["mlflow-server", "http-server", "https-server"]
 }
 
+# --- Identity and Access ---
+variable "service_account_email" {
+  description = "Custom service account email (optional)"
+  type        = string
+  default     = ""
+}
+
+# --- VM Metadata and Scripts ---
 variable "metadata" {
   description = "Additional metadata for the VM"
   type        = map(string)
@@ -153,6 +160,7 @@ variable "startup_script" {
   default     = ""
 }
 
+# --- Dynamic Variables from YAML ---
 # Add any extra YAML params as string variables if not already defined
 {%- set defined = [
   "project_id", "region", "zone", "create_service", "create_bucket", "service_name", "vm_name", "machine_type", "disk_size_gb", "disk_type", "image_family", "artifact_bucket", "backend_store_uri", "image", "allow_public_access", "mlflow_port", "enable_https", "service_account_email", "network", "subnetwork", "allow_http_https", "use_postgres", "cloudsql_instance_annotation", "tags", "metadata", "startup_script"
@@ -173,7 +181,7 @@ variable "{{ key }}" {
   {% endfor %}
 {% endfor %}
 
-# Control variables for module behavior
+# --- Module Control Variables ---
 {% for stage in stack %}
   {% for stage_name, tool in stage.items() %}
 variable "enable_{{ stage_name }}_{{ tool.name }}" {
