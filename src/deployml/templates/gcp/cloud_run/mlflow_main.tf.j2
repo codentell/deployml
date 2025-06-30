@@ -1,0 +1,126 @@
+{% extends "gcp/cloud_run/base_main.tf.j2" %}
+
+{% set flags = namespace(needs_postgres=false) %}
+{% for stage in stack %}
+  {% for stage_name, tool in stage.items() %}
+    {% if tool.name == "mlflow" and tool.params.get("backend_store_uri", "") == "postgresql" %}
+      {% set flags.needs_postgres = true %}
+    {% endif %}
+  {% endfor %}
+{% endfor %}
+
+{% block artifact_bucket %}
+{% if create_artifact_bucket %}
+{% for stage in stack %}
+  {% for stage_name, tool in stage.items() %}
+    {% if tool.name == "mlflow" and tool.params.get("artifact_bucket") %}
+resource "google_storage_bucket" "{{ stage_name }}_mlflow_artifact" {
+  name          = var.artifact_bucket
+  location      = var.region
+  force_destroy = true
+
+  labels = {
+    component  = "mlflow-artifacts"
+    managed-by = "terraform"
+    stage      = "{{ stage_name }}"
+  }
+}
+    {% endif %}
+  {% endfor %}
+{% endfor %}
+{% endif %}
+{% endblock %}
+
+{% block postgres %}
+# Detect if any stage needs PostgreSQL for mlflow
+{% if flags.needs_postgres %}
+module "cloud_sql_postgres" {
+  source = "./modules/mlflow/cloud/gcp/cloud_sql_postgres"
+  project_id      = var.project_id
+  region          = var.region
+  db_instance_name = "mlflow-postgres--{{ project_id }}"
+  db_name         = "mlflow"
+  db_user         = "mlflow"
+}
+{% endif %}
+{% endblock %}
+
+{% block module %}
+{% for stage in stack %}
+  {% for stage_name, tool in stage.items() %}
+    {% if tool.name == "mlflow" %}
+module "{{ stage_name }}_mlflow" {
+  source = "./modules/mlflow/cloud/gcp/cloud_run"
+  count  = var.enable_{{ stage_name }}_mlflow ? 1 : 0
+  project_id = var.project_id
+  region     = var.region
+  create_service = {% if stage_name == "experiment_tracking" %}true{% else %}false{% endif %}
+  allow_public_access = var.allow_public_access
+  cpu_limit = var.cpu_limit
+  memory_limit = var.memory_limit
+  cpu_request = var.cpu_request
+  memory_request = var.memory_request
+  max_scale = var.max_scale
+  container_concurrency = var.container_concurrency
+  artifact_bucket = {% if create_artifact_bucket and tool.params.get("artifact_bucket") %}google_storage_bucket.{{ stage_name }}_mlflow_artifact.name{% else %}var.artifact_bucket{% endif %}
+  {% if flags.needs_postgres %}
+  backend_store_uri = module.cloud_sql_postgres.connection_string
+  cloudsql_instance_annotation = module.cloud_sql_postgres.instance_connection_name
+  {% else %}
+  backend_store_uri = "{{ tool.params.get('backend_store_uri', 'sqlite:///mlflow.db') }}"
+  cloudsql_instance_annotation = ""
+  {% endif %}
+  use_postgres = {{ "true" if flags.needs_postgres else "false" }}
+  {% if flags.needs_postgres %}
+  depends_on = [module.cloud_sql_postgres]
+  {% endif %}
+  {% for key, value in tool.params.items() %}
+    {%- set resource_params = ["cpu_limit", "memory_limit", "cpu_request", "memory_request", "max_scale", "container_concurrency"] -%}
+    {% if key == "image" %}
+      image = var.{{ stage_name }}_mlflow_image != "" ? var.{{ stage_name }}_mlflow_image : var.global_image
+    {% elif key == "artifact_bucket" %}
+      # Skip - already handled above
+    {% elif key not in resource_params and key != "create_artifact_bucket" and key != "backend_store_uri" and key != "use_postgres" %}
+      {{ key }} = var.{{ key }}
+    {% endif %}
+  {% endfor %}
+}
+    {% endif %}
+  {% endfor %}
+{% endfor %}
+{% endblock %}
+
+{% block outputs %}
+{% for stage in stack %}
+  {% for stage_name, tool in stage.items() %}
+    {% if tool.name == "mlflow" %}
+output "{{ stage_name }}_mlflow_url" {
+  value = var.enable_{{ stage_name }}_mlflow && length(module.{{ stage_name }}_mlflow) > 0 ? module.{{ stage_name }}_mlflow[0].service_url : ""
+}
+output "{{ stage_name }}_mlflow_bucket" {
+  value = var.enable_{{ stage_name }}_mlflow && length(module.{{ stage_name }}_mlflow) > 0 ? module.{{ stage_name }}_mlflow[0].bucket_name : ""
+}
+    {% endif %}
+  {% endfor %}
+{% endfor %}
+{% if create_artifact_bucket %}
+{% for stage in stack %}
+  {% for stage_name, tool in stage.items() %}
+    {% if tool.name == "mlflow" and tool.params.get("artifact_bucket") %}
+output "{{ stage_name }}_mlflow_artifact_bucket" {
+  value = google_storage_bucket.{{ stage_name }}_mlflow_artifact.name
+}
+    {% endif %}
+  {% endfor %}
+{% endfor %}
+{% endif %}
+{% if flags.needs_postgres %}
+output "instance_connection_name" {
+  value = module.cloud_sql_postgres.instance_connection_name
+}
+output "postgresql_credentials" {
+  value = module.cloud_sql_postgres.postgresql_credentials
+  sensitive = true
+}
+{% endif %}
+{% endblock %} 

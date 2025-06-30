@@ -18,7 +18,6 @@ poetry run deployml deploy -c gcp-sample.yaml
 
 
 
-
 docker build --platform=linux/amd64 -t gcr.io/mlops-intro-461805/mlflow/mlflow:latest .
 
 gcloud auth configure-docker

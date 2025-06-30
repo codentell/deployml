@@ -1,0 +1,20 @@
+provider "google" {
+  project = var.project_id
+  region  = var.region
+}
+
+{% block artifact_bucket %}
+# Default: no artifact bucket logic
+{% endblock %}
+
+{% block postgres %}
+# Default: no postgres logic
+{% endblock %}
+
+{% block module %}
+# Default: no module logic
+{% endblock %}
+
+{% block outputs %}
+# Default: no outputs
+{% endblock %} 
