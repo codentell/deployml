@@ -11,6 +11,13 @@ TOOL_VARIABLES = {
         {"name": "backend_store_uri", "type": "string", "description": "URI for MLflow backend store"},
         {"name": "image", "type": "string", "description": "MLflow Docker image"},
     ],
+    "wandb": [
+        {"name": "project_id", "type": "string", "description": "GCP project ID"},
+        {"name": "region", "type": "string", "description": "Deployment region"},
+        {"name": "artifact_bucket", "type": "string", "description": "Bucket for wandb artifacts"},
+        {"name": "wandb_port", "type": "number", "description": "Port for wandb server (default 8080)"},
+        {"name": "image", "type": "string", "description": "wandb Docker image (optional)"},
+    ],
     "fastapi": [
         {"name": "project_id", "type": "string", "description": "GCP project ID"},
         {"name": "region", "type": "string", "description": "Deployment region"},

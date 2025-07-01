@@ -23,12 +23,10 @@ from google.cloud import storage
 
 # Import refactored utility functions
 from deployml.utils.helpers import (
-    check_command,
     check,
     check_gcp_auth,
     copy_modules_to_workspace,
     bucket_exists,
-    generate_unique_bucket_name,
     generate_bucket_name,
     estimate_terraform_time,
     cleanup_cloud_sql_resources,
@@ -285,7 +283,7 @@ def deploy(
             for stage_name, tool in stage.items():
                 if (
                     stage_name == "artifact_tracking"
-                    and tool.get("name") == "mlflow"
+                    and tool.get("name") in ["mlflow", "wandb"]
                 ):
                     if "params" not in tool:
                         tool["params"] = {}
@@ -324,11 +322,12 @@ def deploy(
                                 not in tool["params"]
                             ):
                                 tool["params"]["create_artifact_bucket"] = True
-                    # Set use_postgres param based on backend_store_uri
-                    backend_uri = tool["params"].get("backend_store_uri", "")
-                    tool["params"]["use_postgres"] = backend_uri.startswith(
-                        "postgresql"
-                    )
+                    # Set use_postgres param based on backend_store_uri (mlflow only)
+                    if tool.get("name") == "mlflow":
+                        backend_uri = tool["params"].get("backend_store_uri", "")
+                        tool["params"]["use_postgres"] = backend_uri.startswith(
+                            "postgresql"
+                        )
 
     workspace_name = config.get("name") or "development"
 

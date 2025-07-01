@@ -11,7 +11,7 @@ enable_{{ stage_name }}_{{ tool.name }} = true
 
 # Dynamic parameter assignment from YAML config
 {%- set defined = [
-  "project_id", "region", "zone", "create_service", "create_bucket", "service_name", "vm_name", "machine_type", "disk_size_gb", "disk_type", "image_family", "artifact_bucket", "backend_store_uri", "image", "allow_public_access", "mlflow_port", "enable_https", "service_account_email", "network", "subnetwork", "allow_http_https", "use_postgres", "cloudsql_instance_annotation", "tags", "metadata", "startup_script"
+  "project_id", "region", "zone", "create_service", "create_bucket", "service_name", "vm_name", "machine_type", "disk_size_gb", "disk_type", "image_family", "artifact_bucket", "backend_store_uri", "image", "allow_public_access", "mlflow_port", "wandb_port", "enable_https", "service_account_email", "network", "subnetwork", "allow_http_https", "use_postgres", "cloudsql_instance_annotation", "tags", "metadata", "startup_script"
 ] -%}
 {%- set seen = [] -%}
 {% for stage in stack %}
@@ -21,7 +21,7 @@ enable_{{ stage_name }}_{{ tool.name }} = true
         {%- set _ = seen.append(key) -%}
         {% if key in ["create_service", "create_bucket", "allow_public_access", "allow_http_https", "enable_https", "use_postgres"] %}
 {{ key }} = {{ "true" if value else "false" }}
-        {% elif key in ["disk_size_gb", "mlflow_port"] %}
+        {% elif key in ["disk_size_gb", "mlflow_port", "wandb_port"] %}
 {{ key }} = {{ value }}
         {% elif key == "tags" %}
 {{ key }} = {{ value }}
@@ -43,10 +43,10 @@ create_service = true
 create_bucket = false
 {% endif %}
 {% if "service_name" not in seen %}
-service_name = "mlflow-server"
+service_name = "{{ stack[0].experiment_tracking.name }}-server"
 {% endif %}
 {% if "vm_name" not in seen %}
-vm_name = "mlflow-vm"
+vm_name = "{{ stack[0].experiment_tracking.name }}-vm"
 {% endif %}
 {% if "machine_type" not in seen %}
 machine_type = "e2-medium"
@@ -63,17 +63,29 @@ image_family = "debian-cloud/debian-12"
 {% if "artifact_bucket" not in seen %}
 artifact_bucket = ""
 {% endif %}
+{% if stack[0].experiment_tracking.name == 'mlflow' %}
 {% if "backend_store_uri" not in seen %}
 backend_store_uri = ""
 {% endif %}
 {% if "image" not in seen %}
 image = ""
 {% endif %}
-{% if "allow_public_access" not in seen %}
-allow_public_access = true
-{% endif %}
 {% if "mlflow_port" not in seen %}
 mlflow_port = 5000
+{% endif %}
+{% if "use_postgres" not in seen %}
+use_postgres = false
+{% endif %}
+{% if "cloudsql_instance_annotation" not in seen %}
+cloudsql_instance_annotation = ""
+{% endif %}
+{% elif stack[0].experiment_tracking.name == 'wandb' %}
+{% if "wandb_port" not in seen %}
+wandb_port = 8080
+{% endif %}
+{% endif %}
+{% if "allow_public_access" not in seen %}
+allow_public_access = true
 {% endif %}
 {% if "enable_https" not in seen %}
 enable_https = false
@@ -90,14 +102,8 @@ subnetwork = ""
 {% if "allow_http_https" not in seen %}
 allow_http_https = true
 {% endif %}
-{% if "use_postgres" not in seen %}
-use_postgres = false
-{% endif %}
-{% if "cloudsql_instance_annotation" not in seen %}
-cloudsql_instance_annotation = ""
-{% endif %}
 {% if "tags" not in seen %}
-tags = ["mlflow-server", "http-server", "https-server"]
+tags = ["{{ stack[0].experiment_tracking.name }}-server", "http-server", "https-server"]
 {% endif %}
 {% if "metadata" not in seen %}
 metadata = {}
