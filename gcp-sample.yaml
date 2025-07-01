@@ -4,7 +4,7 @@ provider:
   project_id: mlops-intro-461805
   region: us-west1
 deployment:
-  type: cloud_vm
+  type: cloud_run
 stack:
   - experiment_tracking:
       name: wandb

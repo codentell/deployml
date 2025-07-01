@@ -361,7 +361,16 @@ def deploy(
                 tool["params"]["backend_store_uri"] = "postgresql"
 
     env = Environment(loader=FileSystemLoader(TEMPLATE_DIR))
-    main_template = env.get_template(f"{cloud}/{deployment_type}/main.tf.j2")
+    # PATCH: Use wandb_main.tf.j2 or mlflow_main.tf.j2 for cloud_run if present
+    if deployment_type == "cloud_run":
+        if any(tool.get("name") == "wandb" for stage in stack for tool in stage.values()):
+            main_template = env.get_template(f"{cloud}/{deployment_type}/wandb_main.tf.j2")
+        elif any(tool.get("name") == "mlflow" for stage in stack for tool in stage.values()):
+            main_template = env.get_template(f"{cloud}/{deployment_type}/mlflow_main.tf.j2")
+        else:
+            main_template = env.get_template(f"{cloud}/{deployment_type}/main.tf.j2")
+    else:
+        main_template = env.get_template(f"{cloud}/{deployment_type}/main.tf.j2")
     var_template = env.get_template(
         f"{cloud}/{deployment_type}/variables.tf.j2"
     )
