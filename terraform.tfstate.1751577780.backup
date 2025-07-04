@@ -1,0 +1,261 @@
+{
+  "version": 4,
+  "terraform_version": "1.11.4",
+  "serial": 41,
+  "lineage": "9949dc8d-56a7-2438-ad21-4ff3b3666502",
+  "outputs": {
+    "test_bucket_name": {
+      "value": "test-mlflow-artifacts-355e0c9d",
+      "type": "string"
+    },
+    "test_ssh_command": {
+      "value": "gcloud compute ssh test-mlflow-vm --zone=us-west1-a",
+      "type": "string"
+    }
+  },
+  "resources": [
+    {
+      "mode": "managed",
+      "type": "google_project_service",
+      "name": "required_apis",
+      "provider": "provider[\"registry.terraform.io/hashicorp/google\"]",
+      "instances": [
+        {
+          "index_key": "cloudresourcemanager.googleapis.com",
+          "schema_version": 0,
+          "attributes": {
+            "disable_dependent_services": null,
+            "disable_on_destroy": false,
+            "id": "mlopsresearch-464821/cloudresourcemanager.googleapis.com",
+            "project": "mlopsresearch-464821",
+            "service": "cloudresourcemanager.googleapis.com",
+            "timeouts": null
+          },
+          "sensitive_attributes": [],
+          "private": "eyJlMmJmYjczMC1lY2FhLTExZTYtOGY4OC0zNDM2M2JjN2M0YzAiOnsiY3JlYXRlIjoxMjAwMDAwMDAwMDAwLCJkZWxldGUiOjEyMDAwMDAwMDAwMDAsInJlYWQiOjYwMDAwMDAwMDAwMCwidXBkYXRlIjoxMjAwMDAwMDAwMDAwfX0="
+        },
+        {
+          "index_key": "compute.googleapis.com",
+          "schema_version": 0,
+          "attributes": {
+            "disable_dependent_services": null,
+            "disable_on_destroy": false,
+            "id": "mlopsresearch-464821/compute.googleapis.com",
+            "project": "mlopsresearch-464821",
+            "service": "compute.googleapis.com",
+            "timeouts": null
+          },
+          "sensitive_attributes": [],
+          "private": "eyJlMmJmYjczMC1lY2FhLTExZTYtOGY4OC0zNDM2M2JjN2M0YzAiOnsiY3JlYXRlIjoxMjAwMDAwMDAwMDAwLCJkZWxldGUiOjEyMDAwMDAwMDAwMDAsInJlYWQiOjYwMDAwMDAwMDAwMCwidXBkYXRlIjoxMjAwMDAwMDAwMDAwfX0="
+        },
+        {
+          "index_key": "iam.googleapis.com",
+          "schema_version": 0,
+          "attributes": {
+            "disable_dependent_services": null,
+            "disable_on_destroy": false,
+            "id": "mlopsresearch-464821/iam.googleapis.com",
+            "project": "mlopsresearch-464821",
+            "service": "iam.googleapis.com",
+            "timeouts": null
+          },
+          "sensitive_attributes": [],
+          "private": "eyJlMmJmYjczMC1lY2FhLTExZTYtOGY4OC0zNDM2M2JjN2M0YzAiOnsiY3JlYXRlIjoxMjAwMDAwMDAwMDAwLCJkZWxldGUiOjEyMDAwMDAwMDAwMDAsInJlYWQiOjYwMDAwMDAwMDAwMCwidXBkYXRlIjoxMjAwMDAwMDAwMDAwfX0="
+        },
+        {
+          "index_key": "iamcredentials.googleapis.com",
+          "schema_version": 0,
+          "attributes": {
+            "disable_dependent_services": null,
+            "disable_on_destroy": false,
+            "id": "mlopsresearch-464821/iamcredentials.googleapis.com",
+            "project": "mlopsresearch-464821",
+            "service": "iamcredentials.googleapis.com",
+            "timeouts": null
+          },
+          "sensitive_attributes": [],
+          "private": "eyJlMmJmYjczMC1lY2FhLTExZTYtOGY4OC0zNDM2M2JjN2M0YzAiOnsiY3JlYXRlIjoxMjAwMDAwMDAwMDAwLCJkZWxldGUiOjEyMDAwMDAwMDAwMDAsInJlYWQiOjYwMDAwMDAwMDAwMCwidXBkYXRlIjoxMjAwMDAwMDAwMDAwfX0="
+        },
+        {
+          "index_key": "logging.googleapis.com",
+          "schema_version": 0,
+          "attributes": {
+            "disable_dependent_services": null,
+            "disable_on_destroy": false,
+            "id": "mlopsresearch-464821/logging.googleapis.com",
+            "project": "mlopsresearch-464821",
+            "service": "logging.googleapis.com",
+            "timeouts": null
+          },
+          "sensitive_attributes": [],
+          "private": "eyJlMmJmYjczMC1lY2FhLTExZTYtOGY4OC0zNDM2M2JjN2M0YzAiOnsiY3JlYXRlIjoxMjAwMDAwMDAwMDAwLCJkZWxldGUiOjEyMDAwMDAwMDAwMDAsInJlYWQiOjYwMDAwMDAwMDAwMCwidXBkYXRlIjoxMjAwMDAwMDAwMDAwfX0="
+        },
+        {
+          "index_key": "monitoring.googleapis.com",
+          "schema_version": 0,
+          "attributes": {
+            "disable_dependent_services": null,
+            "disable_on_destroy": false,
+            "id": "mlopsresearch-464821/monitoring.googleapis.com",
+            "project": "mlopsresearch-464821",
+            "service": "monitoring.googleapis.com",
+            "timeouts": null
+          },
+          "sensitive_attributes": [],
+          "private": "eyJlMmJmYjczMC1lY2FhLTExZTYtOGY4OC0zNDM2M2JjN2M0YzAiOnsiY3JlYXRlIjoxMjAwMDAwMDAwMDAwLCJkZWxldGUiOjEyMDAwMDAwMDAwMDAsInJlYWQiOjYwMDAwMDAwMDAwMCwidXBkYXRlIjoxMjAwMDAwMDAwMDAwfX0="
+        },
+        {
+          "index_key": "serviceusage.googleapis.com",
+          "schema_version": 0,
+          "attributes": {
+            "disable_dependent_services": null,
+            "disable_on_destroy": false,
+            "id": "mlopsresearch-464821/serviceusage.googleapis.com",
+            "project": "mlopsresearch-464821",
+            "service": "serviceusage.googleapis.com",
+            "timeouts": null
+          },
+          "sensitive_attributes": [],
+          "private": "eyJlMmJmYjczMC1lY2FhLTExZTYtOGY4OC0zNDM2M2JjN2M0YzAiOnsiY3JlYXRlIjoxMjAwMDAwMDAwMDAwLCJkZWxldGUiOjEyMDAwMDAwMDAwMDAsInJlYWQiOjYwMDAwMDAwMDAwMCwidXBkYXRlIjoxMjAwMDAwMDAwMDAwfX0="
+        },
+        {
+          "index_key": "storage.googleapis.com",
+          "schema_version": 0,
+          "attributes": {
+            "disable_dependent_services": null,
+            "disable_on_destroy": false,
+            "id": "mlopsresearch-464821/storage.googleapis.com",
+            "project": "mlopsresearch-464821",
+            "service": "storage.googleapis.com",
+            "timeouts": null
+          },
+          "sensitive_attributes": [],
+          "private": "eyJlMmJmYjczMC1lY2FhLTExZTYtOGY4OC0zNDM2M2JjN2M0YzAiOnsiY3JlYXRlIjoxMjAwMDAwMDAwMDAwLCJkZWxldGUiOjEyMDAwMDAwMDAwMDAsInJlYWQiOjYwMDAwMDAwMDAwMCwidXBkYXRlIjoxMjAwMDAwMDAwMDAwfX0="
+        }
+      ]
+    },
+    {
+      "mode": "managed",
+      "type": "random_id",
+      "name": "bucket_suffix",
+      "provider": "provider[\"registry.terraform.io/hashicorp/random\"]",
+      "instances": [
+        {
+          "schema_version": 0,
+          "attributes": {
+            "b64_std": "NV4MnQ==",
+            "b64_url": "NV4MnQ",
+            "byte_length": 4,
+            "dec": "895356061",
+            "hex": "355e0c9d",
+            "id": "NV4MnQ",
+            "keepers": null,
+            "prefix": null
+          },
+          "sensitive_attributes": []
+        }
+      ]
+    },
+    {
+      "mode": "managed",
+      "type": "time_sleep",
+      "name": "wait_for_apis",
+      "provider": "provider[\"registry.terraform.io/hashicorp/time\"]",
+      "instances": [
+        {
+          "schema_version": 0,
+          "attributes": {
+            "create_duration": "180s",
+            "destroy_duration": null,
+            "id": "2025-07-03T21:15:17Z",
+            "triggers": null
+          },
+          "sensitive_attributes": [],
+          "dependencies": [
+            "google_project_service.required_apis"
+          ]
+        }
+      ]
+    },
+    {
+      "module": "module.test_mlflow_vm",
+      "mode": "managed",
+      "type": "google_service_account",
+      "name": "vm_service_account",
+      "provider": "provider[\"registry.terraform.io/hashicorp/google\"]",
+      "instances": [
+        {
+          "schema_version": 0,
+          "attributes": {
+            "account_id": "mlflow-vm-sa",
+            "description": "",
+            "disabled": false,
+            "display_name": "Service Account for MLflow VM",
+            "email": "mlflow-vm-sa@mlopsresearch-464821.iam.gserviceaccount.com",
+            "id": "projects/mlopsresearch-464821/serviceAccounts/mlflow-vm-sa@mlopsresearch-464821.iam.gserviceaccount.com",
+            "member": "serviceAccount:mlflow-vm-sa@mlopsresearch-464821.iam.gserviceaccount.com",
+            "name": "projects/mlopsresearch-464821/serviceAccounts/mlflow-vm-sa@mlopsresearch-464821.iam.gserviceaccount.com",
+            "project": "mlopsresearch-464821",
+            "timeouts": null,
+            "unique_id": "105058006212856104277"
+          },
+          "sensitive_attributes": [],
+          "private": "eyJlMmJmYjczMC1lY2FhLTExZTYtOGY4OC0zNDM2M2JjN2M0YzAiOnsiY3JlYXRlIjozMDAwMDAwMDAwMDB9fQ=="
+        }
+      ]
+    },
+    {
+      "module": "module.test_mlflow_vm",
+      "mode": "managed",
+      "type": "google_storage_bucket",
+      "name": "artifact",
+      "provider": "provider[\"registry.terraform.io/hashicorp/google\"]",
+      "instances": [
+        {
+          "index_key": 0,
+          "schema_version": 0,
+          "attributes": {
+            "autoclass": [],
+            "cors": [],
+            "custom_placement_config": [],
+            "default_event_based_hold": false,
+            "encryption": [],
+            "force_destroy": true,
+            "id": "test-mlflow-artifacts-355e0c9d",
+            "labels": {
+              "component": "mlflow-artifacts",
+              "managed-by": "terraform"
+            },
+            "lifecycle_rule": [],
+            "location": "US-WEST1",
+            "logging": [],
+            "name": "test-mlflow-artifacts-355e0c9d",
+            "project": "mlopsresearch-464821",
+            "public_access_prevention": "inherited",
+            "requester_pays": false,
+            "retention_policy": [],
+            "self_link": "https://www.googleapis.com/storage/v1/b/test-mlflow-artifacts-355e0c9d",
+            "soft_delete_policy": [
+              {
+                "effective_time": "2025-07-03T21:08:55.170Z",
+                "retention_duration_seconds": 604800
+              }
+            ],
+            "storage_class": "STANDARD",
+            "timeouts": null,
+            "uniform_bucket_level_access": false,
+            "url": "gs://test-mlflow-artifacts-355e0c9d",
+            "versioning": [],
+            "website": []
+          },
+          "sensitive_attributes": [],
+          "private": "eyJlMmJmYjczMC1lY2FhLTExZTYtOGY4OC0zNDM2M2JjN2M0YzAiOnsiY3JlYXRlIjo2MDAwMDAwMDAwMDAsInJlYWQiOjI0MDAwMDAwMDAwMCwidXBkYXRlIjoyNDAwMDAwMDAwMDB9fQ==",
+          "dependencies": [
+            "random_id.bucket_suffix"
+          ]
+        }
+      ]
+    }
+  ],
+  "check_results": null
+}

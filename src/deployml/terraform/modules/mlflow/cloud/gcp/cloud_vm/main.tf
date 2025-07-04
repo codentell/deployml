@@ -1,10 +1,3 @@
-# Configure the Google Cloud provider
-provider "google" {
-  project = var.project_id
-  region  = var.region
-  zone    = var.zone
-}
-
 # Storage bucket - only create if explicitly requested
 resource "google_storage_bucket" "artifact" {
   count         = var.create_bucket && var.artifact_bucket != "" ? 1 : 0
