@@ -1,7 +1,7 @@
 name: gcp-mlops-stack-mlflow-vm
 provider:
   name: gcp
-  project_id: mlopsresearch
+  project_id: hatchet3
   region: us-west2
   zone: us-west2-a
 deployment:
