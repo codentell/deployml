@@ -1,9 +1,15 @@
 name: gcp-mlops-stack-mlflow-vm
 provider:
   name: gcp
-  project_id: hatchet3
+  project_id: hatchet4 
   region: us-west2
   zone: us-west2-a
+
+cost_analysis:
+  enabled: true              # Enable/disable cost analysis (default: true)
+  warning_threshold: 50.0    # Warn if monthly cost exceeds this amount (default: 100.0)
+  currency: "USD"   
+
 deployment:
   type: cloud_vm
 stack:
