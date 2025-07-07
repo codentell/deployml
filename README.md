@@ -9,26 +9,28 @@ Infrastructure for academia with cost analysis
 - 🔬 **ML-Focused**: Pre-configured for MLflow, experiment tracking, and model registry
 - 🛡️ **Production Ready**: Security best practices and service account management
 
-## Quick Start
+## Instructions
 
 ```bash
 poetry install
 poetry run deployml doctor
-poetry run deployml generate  # Create a configuration file
 poetry run deployml deploy --config-path your-config.yaml
 ```
+
+docker build --platform=linux/amd64 -t gcr.io/mlops-intro-461805/mlflow/mlflow:latest .
+
+gcloud auth configure-docker docker push gcr.io/PROJECT_ID/mlflow-app:latest
 
 ## Cost Analysis Integration
 
 deployml integrates with [infracost](https://www.infracost.io/) to provide cost estimates before deployment:
 
-### Installation (Optional)
+### Installation
 ```bash
-# Install infracost for cost analysis
-curl -fsSL https://raw.githubusercontent.com/infracost/infracost/master/scripts/install.sh | sh
+brew install infracost
 ```
 
-### Configuration
+### Cost Analysis Configuration
 Add cost analysis settings to your YAML configuration:
 
 ```yaml
@@ -38,31 +40,6 @@ cost_analysis:
   warning_threshold: 100.0   # Warn if monthly cost exceeds this amount
   currency: "USD"            # Currency for cost display
 ```
-
-### Cost Analysis Output
-When deploying, you'll see detailed cost breakdowns:
-
-```
-💰 COST ANALYSIS
-════════════════════════════════════════
-Monthly Cost: $30.34 USD
-Hourly Cost:  $0.0416 USD
-
-📋 Resource Breakdown:
-• google_compute_instance.mlflow_vm
-  Type: google_compute_instance
-  Monthly Cost: $30.34
-    └─ Instance (e2-medium): $29.38
-    └─ Storage (20GB): $0.96
-
-🚀 Deploy stack? 💰 Monthly cost: ~$30.34 USD [y/N]:
-```
-
-
-docker build --platform=linux/amd64 -t gcr.io/mlops-intro-461805/mlflow/mlflow:latest .
-
-gcloud auth configure-docker
-docker push gcr.io/PROJECT_ID/mlflow-app:latest
 
 ## Cloud Run Service Account Setup
 
