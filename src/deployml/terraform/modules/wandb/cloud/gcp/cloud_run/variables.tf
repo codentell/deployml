@@ -106,4 +106,4 @@ variable "gcp_service_list" {
     "monitoring.googleapis.com",               # For monitoring
     "logging.googleapis.com",                  # For logging
   ]
-} 
+}

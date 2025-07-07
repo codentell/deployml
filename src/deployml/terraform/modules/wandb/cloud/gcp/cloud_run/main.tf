@@ -42,6 +42,14 @@ resource "google_cloud_run_service" "wandb" {
             memory = var.memory_request
           }
         }
+        # Set WANDB_ARTIFACT_DIR if artifact_bucket is set
+        dynamic "env" {
+          for_each = var.artifact_bucket != "" ? [1] : []
+          content {
+            name  = "WANDB_ARTIFACT_DIR"
+            value = "gs://${var.artifact_bucket}"
+          }
+        }
       }
     }
   }

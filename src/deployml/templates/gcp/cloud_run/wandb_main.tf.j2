@@ -16,6 +16,25 @@ resource "google_storage_bucket" "{{ stage_name }}_wandb_artifact" {
     stage      = "{{ stage_name }}"
   }
 }
+
+# Pub/Sub topic for bucket notifications
+resource "google_pubsub_topic" "{{ stage_name }}_wandb_bucket_topic" {
+  name = "${google_storage_bucket.{{ stage_name }}_wandb_artifact.name}-notifications"
+}
+
+# Storage notification to Pub/Sub
+resource "google_storage_notification" "{{ stage_name }}_wandb_bucket_notification" {
+  bucket         = google_storage_bucket.{{ stage_name }}_wandb_artifact.name
+  topic          = google_pubsub_topic.{{ stage_name }}_wandb_bucket_topic.id
+  event_types    = ["OBJECT_FINALIZE"]
+  payload_format = "JSON_API_V1"
+}
+
+# Pub/Sub subscription for notifications
+resource "google_pubsub_subscription" "{{ stage_name }}_wandb_bucket_subscription" {
+  name  = "${google_storage_bucket.{{ stage_name }}_wandb_artifact.name}-sub"
+  topic = google_pubsub_topic.{{ stage_name }}_wandb_bucket_topic.name
+}
     {% endif %}
   {% endfor %}
 {% endfor %}
@@ -66,6 +85,10 @@ output "{{ stage_name }}_wandb_url" {
 output "{{ stage_name }}_wandb_bucket" {
   value = var.enable_{{ stage_name }}_wandb && length(module.{{ stage_name }}_wandb) > 0 ? module.{{ stage_name }}_wandb[0].bucket_name : ""
 }
+# Output for frontend host (Cloud Run URL)
+output "{{ stage_name }}_wandb_frontend_host" {
+  value = var.enable_{{ stage_name }}_wandb && length(module.{{ stage_name }}_wandb) > 0 ? module.{{ stage_name }}_wandb[0].service_url : ""
+}
     {% endif %}
   {% endfor %}
 {% endfor %}
@@ -75,6 +98,12 @@ output "{{ stage_name }}_wandb_bucket" {
     {% if tool.name == "wandb" and tool.params.get("artifact_bucket") %}
 output "{{ stage_name }}_wandb_artifact_bucket" {
   value = google_storage_bucket.{{ stage_name }}_wandb_artifact.name
+}
+output "{{ stage_name }}_wandb_bucket_topic" {
+  value = google_pubsub_topic.{{ stage_name }}_wandb_bucket_topic.name
+}
+output "{{ stage_name }}_wandb_bucket_subscription" {
+  value = google_pubsub_subscription.{{ stage_name }}_wandb_bucket_subscription.name
 }
     {% endif %}
   {% endfor %}
