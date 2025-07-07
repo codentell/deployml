@@ -1,12 +1,61 @@
 # deployml
-Infra for academia
+Infrastructure for academia with cost analysis
 
-# Instructions
+## Features
+
+- 🏗️ **Infrastructure as Code**: Deploy ML infrastructure using Terraform
+- 💰 **Cost Analysis**: Integrated infracost analysis before deployment
+- ☁️ **Multi-Cloud Support**: GCP, AWS, and more
+- 🔬 **ML-Focused**: Pre-configured for MLflow, experiment tracking, and model registry
+- 🛡️ **Production Ready**: Security best practices and service account management
+
+## Quick Start
 
 ```bash
 poetry install
 poetry run deployml doctor
-poetry run deployml
+poetry run deployml generate  # Create a configuration file
+poetry run deployml deploy --config-path your-config.yaml
+```
+
+## Cost Analysis Integration
+
+deployml integrates with [infracost](https://www.infracost.io/) to provide cost estimates before deployment:
+
+### Installation (Optional)
+```bash
+# Install infracost for cost analysis
+curl -fsSL https://raw.githubusercontent.com/infracost/infracost/master/scripts/install.sh | sh
+```
+
+### Configuration
+Add cost analysis settings to your YAML configuration:
+
+```yaml
+name: "my-mlops-stack"
+cost_analysis:
+  enabled: true              # Enable/disable cost analysis (default: true)
+  warning_threshold: 100.0   # Warn if monthly cost exceeds this amount
+  currency: "USD"            # Currency for cost display
+```
+
+### Cost Analysis Output
+When deploying, you'll see detailed cost breakdowns:
+
+```
+💰 COST ANALYSIS
+════════════════════════════════════════
+Monthly Cost: $30.34 USD
+Hourly Cost:  $0.0416 USD
+
+📋 Resource Breakdown:
+• google_compute_instance.mlflow_vm
+  Type: google_compute_instance
+  Monthly Cost: $30.34
+    └─ Instance (e2-medium): $29.38
+    └─ Storage (20GB): $0.96
+
+🚀 Deploy stack? 💰 Monthly cost: ~$30.34 USD [y/N]:
 ```
 
 

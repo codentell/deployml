@@ -34,6 +34,11 @@ from deployml.utils.helpers import (
     cleanup_terraform_files,
     run_terraform_with_loading_bar,
 )
+from deployml.utils.infracost import (
+    check_infracost_available,
+    run_infracost_analysis,
+    format_cost_for_confirmation,
+)
 
 import re
 import time
@@ -54,6 +59,7 @@ def doctor():
     gcp_installed = check("gcloud")
     gcp_authed = check_gcp_auth() if gcp_installed else False
     aws_installed = check("aws")
+    infracost_installed = check_infracost_available()
 
     # Docker
     if docker_installed:
@@ -66,6 +72,17 @@ def doctor():
         typer.secho("\n✅ Terraform 🔧 is installed", fg=typer.colors.GREEN)
     else:
         typer.secho("\n❌ Terraform is not installed", fg=typer.colors.RED)
+
+    # Infracost
+    if infracost_installed:
+        typer.secho("\n✅ Infracost 💰 is installed", fg=typer.colors.GREEN)
+    else:
+        typer.secho(
+            "\n⚠️ Infracost 💰 not installed (optional)", fg=typer.colors.YELLOW
+        )
+        typer.echo(
+            "   Install for cost analysis: https://www.infracost.io/docs/#quick-start"
+        )
 
     # GCP CLI
     if gcp_installed and gcp_authed:
@@ -426,7 +443,30 @@ def deploy(
         typer.echo(f"❌ Terraform plan failed: {result.stderr}")
         raise typer.Exit(code=1)
 
-    if typer.confirm("Do you want to deploy the stack?"):
+    # Run cost analysis after successful terraform plan
+    # Check for cost analysis configuration
+    cost_config = config.get("cost_analysis", {})
+    cost_enabled = cost_config.get("enabled", True)  # Default: enabled
+    warning_threshold = cost_config.get(
+        "warning_threshold", 100.0
+    )  # Default: $100
+
+    cost_analysis = None
+    if cost_enabled:
+        cost_analysis = run_infracost_analysis(
+            DEPLOYML_TERRAFORM_DIR, warning_threshold
+        )
+
+    # Format confirmation message with cost information
+    if cost_analysis:
+        cost_msg = format_cost_for_confirmation(
+            cost_analysis.total_monthly_cost, cost_analysis.currency
+        )
+        confirmation_msg = f"🚀 Deploy stack? {cost_msg}"
+    else:
+        confirmation_msg = "🚀 Do you want to deploy the stack?"
+
+    if typer.confirm(confirmation_msg):
         estimated_time = estimate_terraform_time(result.stdout, "apply")
         typer.echo(f"🏗️ Applying changes... (Estimated time: {estimated_time})")
         # Suppress output of terraform init
