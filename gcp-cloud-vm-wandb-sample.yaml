@@ -1,4 +1,4 @@
-name: gcp-mlops-stack-mlflow-vm
+name: gcp-mlops-stack-wandb-vm
 provider:
   name: gcp
   project_id: mlops-intro-461805
@@ -14,20 +14,20 @@ deployment:
   type: cloud_vm
 stack:
   - experiment_tracking:
-      name: mlflow
+      name: wandb
       params:
-        service_name: mlflow-server-vm
-        vm_name: mlflow-vm-instance
+        service_name: wandb-server-vm
+        vm_name: wandb-vm-instance
         machine_type: e2-medium
         disk_size_gb: 20
-        mlflow_port: 5000
+        wandb_port: 8080
         allow_public_access: true
   - artifact_tracking:
-      name: mlflow
+      name: wandb
       params: 
-        artifact_bucket: mlflow-artifact-bucket-vm-12345
+        artifact_bucket: wandb-artifact-bucket-vm-12345
         create_bucket: true
   - model_registry:
-      name: mlflow
+      name: wandb
       params: 
-        backend_store_uri: sqlite:///mlflow.db 
+        backend_store_uri: sqlite:///wandb.db 

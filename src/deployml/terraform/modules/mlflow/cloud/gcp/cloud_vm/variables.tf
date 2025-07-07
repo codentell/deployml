@@ -153,3 +153,9 @@ variable "startup_script" {
   default = ""
 }
 
+variable "api_dependency" {
+  type = string
+  description = "Dependency trigger to ensure APIs are ready before creating resources"
+  default = ""
+}
+
