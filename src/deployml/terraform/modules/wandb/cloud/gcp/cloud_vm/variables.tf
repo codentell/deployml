@@ -17,7 +17,7 @@ variable "zone" {
 
 variable "create_service" {
   type = bool
-  description = "Whether to create the MLflow service"
+  description = "Whether to create the wandb service"
   default = true
 }
 
@@ -29,14 +29,14 @@ variable "create_bucket" {
 
 variable "service_name" {
   type = string
-  description = "Name for the MLflow service container"
-  default = "mlflow-server"
+  description = "Name for the wandb service container"
+  default = "wandb-server"
 }
 
 variable "vm_name" {
   type = string
   description = "Name for the VM instance"
-  default = "mlflow-vm"
+  default = "wandb-vm"
 }
 
 variable "machine_type" {
@@ -65,38 +65,20 @@ variable "image_family" {
 
 variable "artifact_bucket" {
     type = string
-    description = "GCS bucket for storing MLflow artifacts"
-    default = ""
-}
-
-variable "backend_store_uri" {
-    type = string
-    description = "URI for MLflow backend store"
-    default = ""
-}
-
-variable "image" {
-    type = string
-    description = "Docker image URI for MLflow server (optional - if empty, MLflow will be installed locally on the VM)"
+    description = "GCS bucket for storing wandb artifacts"
     default = ""
 }
 
 variable "allow_public_access" {
   type = bool
-  description = "Whether to allow public access to MLflow UI"
+  description = "Whether to allow public access to wandb UI"
   default = true
 }
 
-variable "mlflow_port" {
+variable "wandb_port" {
   type = number
-  description = "Port for MLflow server"
-  default = 5000
-}
-
-variable "enable_https" {
-  type = bool
-  description = "Whether to enable HTTPS for MLflow"
-  default = false
+  description = "Port for wandb server"
+  default = 8080
 }
 
 variable "service_account_email" {
@@ -123,22 +105,10 @@ variable "allow_http_https" {
   default = true
 }
 
-variable "use_postgres" {
-  type = bool
-  description = "Whether to use PostgreSQL backend"
-  default = false
-}
-
-variable "cloudsql_instance_annotation" {
-  type = string
-  description = "Cloud SQL instance connection name"
-  default = ""
-}
-
 variable "tags" {
   type = list(string)
   description = "Network tags for the VM"
-  default = ["mlflow-server", "http-server", "https-server"]
+  default = ["wandb-server", "http-server", "https-server"]
 }
 
 variable "metadata" {
@@ -151,11 +121,4 @@ variable "startup_script" {
   type = string
   description = "Custom startup script (optional, overrides default)"
   default = ""
-}
-
-variable "api_dependency" {
-  type = string
-  description = "Dependency trigger to ensure APIs are ready before creating resources"
-  default = ""
-}
-
+} 

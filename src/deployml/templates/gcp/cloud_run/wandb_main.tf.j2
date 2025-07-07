@@ -1,0 +1,112 @@
+{% extends "gcp/cloud_run/base_main.tf.j2" %}
+
+{% block artifact_bucket %}
+{% if create_artifact_bucket %}
+{% for stage in stack %}
+  {% for stage_name, tool in stage.items() %}
+    {% if tool.name == "wandb" and tool.params.get("artifact_bucket") %}
+resource "google_storage_bucket" "{{ stage_name }}_wandb_artifact" {
+  name          = var.artifact_bucket
+  location      = var.region
+  force_destroy = true
+
+  labels = {
+    component  = "wandb-artifacts"
+    managed-by = "terraform"
+    stage      = "{{ stage_name }}"
+  }
+}
+
+# Pub/Sub topic for bucket notifications
+resource "google_pubsub_topic" "{{ stage_name }}_wandb_bucket_topic" {
+  name = "${google_storage_bucket.{{ stage_name }}_wandb_artifact.name}-notifications"
+}
+
+# Storage notification to Pub/Sub
+resource "google_storage_notification" "{{ stage_name }}_wandb_bucket_notification" {
+  bucket         = google_storage_bucket.{{ stage_name }}_wandb_artifact.name
+  topic          = google_pubsub_topic.{{ stage_name }}_wandb_bucket_topic.id
+  event_types    = ["OBJECT_FINALIZE"]
+  payload_format = "JSON_API_V1"
+}
+
+# Pub/Sub subscription for notifications
+resource "google_pubsub_subscription" "{{ stage_name }}_wandb_bucket_subscription" {
+  name  = "${google_storage_bucket.{{ stage_name }}_wandb_artifact.name}-sub"
+  topic = google_pubsub_topic.{{ stage_name }}_wandb_bucket_topic.name
+}
+    {% endif %}
+  {% endfor %}
+{% endfor %}
+{% endif %}
+{% endblock %}
+
+{% block module %}
+{% for stage in stack %}
+  {% for stage_name, tool in stage.items() %}
+    {% if tool.name == "wandb" %}
+module "{{ stage_name }}_wandb" {
+  source = "./modules/wandb/cloud/gcp/cloud_run"
+  count  = var.enable_{{ stage_name }}_wandb ? 1 : 0
+  project_id = var.project_id
+  region     = var.region
+  create_service = {% if stage_name == "experiment_tracking" %}true{% else %}false{% endif %}
+  allow_public_access = var.allow_public_access
+  cpu_limit = var.cpu_limit
+  memory_limit = var.memory_limit
+  cpu_request = var.cpu_request
+  memory_request = var.memory_request
+  max_scale = var.max_scale
+  container_concurrency = var.container_concurrency
+  artifact_bucket = {% if create_artifact_bucket and tool.params.get("artifact_bucket") %}google_storage_bucket.{{ stage_name }}_wandb_artifact.name{% else %}var.artifact_bucket{% endif %}
+  {% for key, value in tool.params.items() %}
+    {%- set resource_params = ["cpu_limit", "memory_limit", "cpu_request", "memory_request", "max_scale", "container_concurrency"] -%}
+    {% if key == "image" %}
+      image = var.{{ stage_name }}_wandb_image != "" ? var.{{ stage_name }}_wandb_image : var.global_image
+    {% elif key == "artifact_bucket" %}
+      # Skip - already handled above
+    {% elif key not in resource_params and key != "create_artifact_bucket" and key != "backend_store_uri" %}
+      {{ key }} = var.{{ key }}
+    {% endif %}
+  {% endfor %}
+}
+    {% endif %}
+  {% endfor %}
+{% endfor %}
+{% endblock %}
+
+{% block outputs %}
+{% for stage in stack %}
+  {% for stage_name, tool in stage.items() %}
+    {% if tool.name == "wandb" %}
+output "{{ stage_name }}_wandb_url" {
+  value = var.enable_{{ stage_name }}_wandb && length(module.{{ stage_name }}_wandb) > 0 ? module.{{ stage_name }}_wandb[0].service_url : ""
+}
+output "{{ stage_name }}_wandb_bucket" {
+  value = var.enable_{{ stage_name }}_wandb && length(module.{{ stage_name }}_wandb) > 0 ? module.{{ stage_name }}_wandb[0].bucket_name : ""
+}
+# Output for frontend host (Cloud Run URL)
+output "{{ stage_name }}_wandb_frontend_host" {
+  value = var.enable_{{ stage_name }}_wandb && length(module.{{ stage_name }}_wandb) > 0 ? module.{{ stage_name }}_wandb[0].service_url : ""
+}
+    {% endif %}
+  {% endfor %}
+{% endfor %}
+{% if create_artifact_bucket %}
+{% for stage in stack %}
+  {% for stage_name, tool in stage.items() %}
+    {% if tool.name == "wandb" and tool.params.get("artifact_bucket") %}
+output "{{ stage_name }}_wandb_artifact_bucket" {
+  value = google_storage_bucket.{{ stage_name }}_wandb_artifact.name
+}
+output "{{ stage_name }}_wandb_bucket_topic" {
+  value = google_pubsub_topic.{{ stage_name }}_wandb_bucket_topic.name
+}
+output "{{ stage_name }}_wandb_bucket_subscription" {
+  value = google_pubsub_subscription.{{ stage_name }}_wandb_bucket_subscription.name
+}
+    {% endif %}
+  {% endfor %}
+{% endfor %}
+{% endif %}
+{% endblock %} 

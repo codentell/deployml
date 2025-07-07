@@ -1,4 +1,4 @@
-# modules/mlflow/cloud/gcp/cloud_run/variables.tf
+# modules/wandb/cloud/gcp/cloud_run/variables.tf
 
 variable "project_id" {
   type        = string
@@ -25,7 +25,7 @@ variable "create_bucket" {
 
 variable "allow_public_access" {
   type        = bool
-  description = "Whether to allow public access to the MLflow service"
+  description = "Whether to allow public access to the wandb service"
   default     = true
 }
 
@@ -33,26 +33,19 @@ variable "allow_public_access" {
 variable "service_name" {
   type        = string
   description = "Name of the Cloud Run service"
-  default     = "mlflow-server"
+  default     = "wandb-server"
 }
 
 variable "image" {
   type        = string
-  description = "Docker image URI for MLflow server"
-  default     = ""
+  description = "Docker image URI for wandb server"
+  default     = "gcr.io/mlops-intro-461805/wandb/wandb:latest"
 }
 
 # Storage configuration
 variable "artifact_bucket" {
   type        = string
-  description = "GCS bucket name for storing MLflow artifacts"
-  default     = ""
-}
-
-# MLflow configuration
-variable "backend_store_uri" {
-  type        = string
-  description = "URI for MLflow backend store (database)"
+  description = "GCS bucket name for storing wandb artifacts"
   default     = ""
 }
 
@@ -99,20 +92,8 @@ variable "bucket_exists" {
   default     = false
 }
 
-variable "cloudsql_instance_annotation" {
-  type        = string
-  default     = ""
-  description = "Cloud SQL instance connection name for annotation."
-}
-
-variable "use_postgres" {
-  type        = bool
-  default     = false
-  description = "Whether to use PostgreSQL (Cloud SQL) as the backend. If false, use SQLite."
-}
-
 variable "gcp_service_list" {
-  description = "The list of APIs necessary for MLflow with Cloud Run"
+  description = "The list of APIs necessary for wandb with Cloud Run"
   type        = list(string)
   default = [
     "run.googleapis.com",                      # Cloud Run
@@ -122,10 +103,6 @@ variable "gcp_service_list" {
     "compute.googleapis.com",
     "storage-api.googleapis.com",              # Google Cloud Storage
     "storage-component.googleapis.com",        # Storage component API
-    "sqladmin.googleapis.com",                 # Cloud SQL Admin API (if using Cloud SQL)
-    "sql-component.googleapis.com",            # Cloud SQL component API (if using Cloud SQL)
-    "servicenetworking.googleapis.com",        # For private service connections (if using Cloud SQL)
-    "cloudkms.googleapis.com",                 # For encryption keys (if using CMEK)
     "monitoring.googleapis.com",               # For monitoring
     "logging.googleapis.com",                  # For logging
   ]

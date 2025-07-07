@@ -1,28 +1,57 @@
+# --- Project and Region Configuration ---
 variable "project_id" {
   description = "GCP project ID"
   type        = string
 }
 
 variable "region" {
-  description = "GCP region"
+  description = "GCP region for deployment"
   type        = string
+  default     = "us-west2"
 }
 
 variable "zone" {
-  description = "GCP zone"
+  description = "The GCP zone to deploy the VM in"
   type        = string
+  default     = "us-west2-a"
+}
+
+# --- Service Configuration ---
+variable "create_service" {
+  description = "Whether to create the experiment tracking service"
+  type        = bool
+  default     = true
+}
+
+variable "service_name" {
+  description = "Name for the experiment tracking service container"
+  type        = string
+  default     = "{{ stack[0].experiment_tracking.name }}-server"
+}
+
+variable "create_bucket" {
+  description = "Whether to create the artifact storage bucket"
+  type        = bool
+  default     = false
+}
+
+# --- VM Configuration ---
+variable "vm_name" {
+  description = "Name for the VM instance"
+  type        = string
+  default     = "{{ stack[0].experiment_tracking.name }}-vm"
 }
 
 variable "machine_type" {
-  description = "VM machine type"
+  description = "GCP machine type for the VM"
   type        = string
   default     = "e2-medium"
 }
 
-variable "disk_size" {
+variable "disk_size_gb" {
   description = "Boot disk size in GB"
   type        = number
-  default     = 10
+  default     = 20
 }
 
 variable "disk_type" {
@@ -34,13 +63,83 @@ variable "disk_type" {
 variable "image_family" {
   description = "VM image family"
   type        = string
-  default     = "cos-cloud/cos-121-lts"
+  default     = "debian-cloud/debian-12"
+}
+
+# --- Tool-specific Configuration ---
+{% if stack[0].experiment_tracking.name == 'mlflow' %}
+variable "artifact_bucket" {
+  description = "GCS bucket for storing MLflow artifacts"
+  type        = string
+  default     = ""
+}
+
+variable "backend_store_uri" {
+  description = "URI for MLflow backend store"
+  type        = string
+  default     = ""
+}
+
+variable "image" {
+  description = "Docker image URI for MLflow server (optional - if empty, MLflow will be installed locally on the VM)"
+  type        = string
+  default     = ""
+}
+
+variable "mlflow_port" {
+  description = "Port for MLflow server"
+  type        = number
+  default     = 5000
+}
+
+variable "use_postgres" {
+  description = "Whether to use PostgreSQL backend"
+  type        = bool
+  default     = false
+}
+
+variable "cloudsql_instance_annotation" {
+  description = "Cloud SQL instance connection name"
+  type        = string
+  default     = ""
+}
+{% elif stack[0].experiment_tracking.name == 'wandb' %}
+variable "artifact_bucket" {
+  description = "GCS bucket for storing wandb artifacts"
+  type        = string
+  default     = ""
+}
+
+variable "wandb_port" {
+  description = "Port for wandb server"
+  type        = number
+  default     = 8080
+}
+{% endif %}
+
+# --- Network and Security ---
+variable "allow_public_access" {
+  description = "Whether to allow public access to the experiment tracking UI"
+  type        = bool
+  default     = true
+}
+
+variable "enable_https" {
+  description = "Whether to enable HTTPS for the experiment tracking server"
+  type        = bool
+  default     = false
 }
 
 variable "network" {
-  description = "Network name"
+  description = "VPC network name"
   type        = string
   default     = "default"
+}
+
+variable "subnetwork" {
+  description = "VPC subnetwork name"
+  type        = string
+  default     = ""
 }
 
 variable "allow_http_https" {
@@ -49,25 +148,45 @@ variable "allow_http_https" {
   default     = true
 }
 
-# Dynamic variables based on YAML config
+variable "tags" {
+  description = "Network tags for the VM"
+  type        = list(string)
+  default     = ["{{ stack[0].experiment_tracking.name }}-server", "http-server", "https-server"]
+}
+
+# --- Identity and Access ---
+variable "service_account_email" {
+  description = "Custom service account email (optional)"
+  type        = string
+  default     = ""
+}
+
+# --- VM Metadata and Scripts ---
+variable "metadata" {
+  description = "Additional metadata for the VM"
+  type        = map(string)
+  default     = {}
+}
+
+variable "startup_script" {
+  description = "Custom startup script (optional, overrides default)"
+  type        = string
+  default     = ""
+}
+
+# --- Dynamic Variables from YAML ---
+{%- set defined = [
+  "project_id", "region", "zone", "create_service", "create_bucket", "service_name", "vm_name", "machine_type", "disk_size_gb", "disk_type", "image_family", "artifact_bucket", "backend_store_uri", "image", "allow_public_access", "mlflow_port", "wandb_port", "enable_https", "service_account_email", "network", "subnetwork", "allow_http_https", "use_postgres", "cloudsql_instance_annotation", "tags", "metadata", "startup_script"
+] -%}
 {%- set seen = [] -%}
 {% for stage in stack %}
   {% for stage_name, tool in stage.items() %}
     {% for key, value in tool.params.items() %}
-      {% if key not in seen %}
+      {% if key not in defined and key not in seen %}
         {%- set _ = seen.append(key) -%}
-        {%- if key != "image" -%}
 variable "{{ key }}" {
-  description = "Parameter {{ key }}"
   type        = string
-  default     = ""
-}
-        {%- endif -%}
-      {% endif %}
-      {% if key == "image" %}
-variable "{{ stage_name }}_{{ tool.name }}_image" {
-  description = "Custom image for {{ stage_name }}_{{ tool.name }}"
-  type        = string
+  description = "YAML param {{ key }}"
   default     = ""
 }
       {% endif %}
@@ -75,7 +194,7 @@ variable "{{ stage_name }}_{{ tool.name }}_image" {
   {% endfor %}
 {% endfor %}
 
-# Control variables for module behavior
+# --- Module Control Variables ---
 {% for stage in stack %}
   {% for stage_name, tool in stage.items() %}
 variable "enable_{{ stage_name }}_{{ tool.name }}" {

@@ -1,19 +1,45 @@
 # deployml
-Infra for academia
+Infrastructure for academia with cost analysis
 
-# Instructions
+## Features
+
+- 🏗️ **Infrastructure as Code**: Deploy ML infrastructure using Terraform
+- 💰 **Cost Analysis**: Integrated infracost analysis before deployment
+- ☁️ **Multi-Cloud Support**: GCP, AWS, and more
+- 🔬 **ML-Focused**: Pre-configured for MLflow, experiment tracking, and model registry
+- 🛡️ **Production Ready**: Security best practices and service account management
+
+## Instructions
 
 ```bash
 poetry install
 poetry run deployml doctor
-poetry run deployml
+poetry run deployml deploy --config-path your-config.yaml
 ```
-
 
 docker build --platform=linux/amd64 -t gcr.io/mlops-intro-461805/mlflow/mlflow:latest .
 
-gcloud auth configure-docker
-docker push gcr.io/PROJECT_ID/mlflow-app:latest
+gcloud auth configure-docker docker push gcr.io/PROJECT_ID/mlflow-app:latest
+
+## Cost Analysis Integration
+
+deployml integrates with [infracost](https://www.infracost.io/) to provide cost estimates before deployment:
+
+### Installation
+```bash
+brew install infracost
+```
+
+### Cost Analysis Configuration
+Add cost analysis settings to your YAML configuration:
+
+```yaml
+name: "my-mlops-stack"
+cost_analysis:
+  enabled: true              # Enable/disable cost analysis (default: true)
+  warning_threshold: 100.0   # Warn if monthly cost exceeds this amount
+  currency: "USD"            # Currency for cost display
+```
 
 ## Cloud Run Service Account Setup
 

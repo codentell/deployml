@@ -1,10 +1,3 @@
-# Configure the Google Cloud provider
-provider "google" {
-  project = var.project_id
-  region  = var.region
-  zone    = var.zone
-}
-
 # Storage bucket - only create if explicitly requested
 resource "google_storage_bucket" "artifact" {
   count         = var.create_bucket && var.artifact_bucket != "" ? 1 : 0
@@ -336,4 +329,11 @@ output "zone" {
 output "ssh_command" {
   description = "SSH command to connect to the VM"
   value       = var.create_service ? "gcloud compute ssh ${google_compute_instance.mlflow_vm[0].name} --zone=${google_compute_instance.mlflow_vm[0].zone}" : ""
+}
+
+resource "google_storage_bucket_iam_member" "mlflow_vm_artifact_access" {
+  count  = var.create_bucket && var.artifact_bucket != "" ? 1 : 0
+  bucket = google_storage_bucket.artifact[0].name
+  role   = "roles/storage.objectAdmin"
+  member = "serviceAccount:${google_service_account.vm_service_account.email}"
 }
