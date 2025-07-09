@@ -1,7 +1,7 @@
 name: gcp-mlops-stack-wandb-vm
 provider:
   name: gcp
-  project_id: mlops-intro-461805
+  project_id: hatchet9
   region: us-west2
   zone: us-west2-a
 

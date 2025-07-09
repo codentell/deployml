@@ -8,7 +8,14 @@ import string
 from deployml.utils.constants import ANIMAL_NAMES, FALLBACK_WORDS, TERRAFORM_DIR
 import subprocess
 import time
-from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TimeElapsedColumn
+from rich.progress import (
+    Progress,
+    SpinnerColumn,
+    TextColumn,
+    BarColumn,
+    TimeElapsedColumn,
+)
+
 
 def check_command(name: str) -> bool:
     """
@@ -46,22 +53,72 @@ def check_gcp_auth() -> bool:
         return False
 
 
-def copy_modules_to_workspace(modules_dir: Path) -> None:
+def copy_modules_to_workspace(
+    modules_dir: Path, stack: list = None, deployment_type: str = None
+) -> None:
     """
-    Copy Terraform module templates to the workspace directory.
+    Copy only the required Terraform module templates to the workspace directory.
 
     Args:
         modules_dir (Path): The destination directory for module templates.
+        stack (list, optional): Stack configuration to determine which modules to copy.
+        deployment_type (str, optional): The deployment type (cloud_run, cloud_vm, etc.)
+                                       If None, copies all modules (backward compatibility).
     """
     MODULE_TEMPLATES_DIR = TERRAFORM_DIR / "modules"
     if not MODULE_TEMPLATES_DIR.exists():
-        raise FileNotFoundError(f"Module templates not found at: {MODULE_TEMPLATES_DIR}")
+        raise FileNotFoundError(
+            f"Module templates not found at: {MODULE_TEMPLATES_DIR}"
+        )
+
+    # If no stack provided, copy all modules (backward compatibility)
+    if stack is None:
+        for module_path in MODULE_TEMPLATES_DIR.iterdir():
+            if module_path.is_dir():
+                dest_path = modules_dir / module_path.name
+                if dest_path.exists():
+                    shutil.rmtree(dest_path)
+                shutil.copytree(module_path, dest_path)
+        return
+
+    # Determine which modules are actually used in the stack
+    used_modules = set()
+    for stage in stack:
+        for stage_name, tool in stage.items():
+            tool_name = tool.get("name")
+            if tool_name:
+                used_modules.add(tool_name)
+
+    # Only copy the modules that are being used, and only the specific deployment type
     for module_path in MODULE_TEMPLATES_DIR.iterdir():
-        if module_path.is_dir():
-            dest_path = modules_dir / module_path.name
-            if dest_path.exists():
-                shutil.rmtree(dest_path)
-            shutil.copytree(module_path, dest_path)
+        if module_path.is_dir() and module_path.name in used_modules:
+            # Create the destination module directory
+            dest_module_path = modules_dir / module_path.name
+            if dest_module_path.exists():
+                shutil.rmtree(dest_module_path)
+            dest_module_path.mkdir(parents=True, exist_ok=True)
+
+            # Copy only the specific deployment type if specified
+            if deployment_type:
+                deployment_source = (
+                    module_path / "cloud" / "gcp" / deployment_type
+                )
+                if deployment_source.exists():
+                    deployment_dest = (
+                        dest_module_path / "cloud" / "gcp" / deployment_type
+                    )
+                    deployment_dest.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copytree(deployment_source, deployment_dest)
+                else:
+                    # Fallback: copy entire module if specific deployment type doesn't exist
+                    shutil.copytree(
+                        module_path, dest_module_path, dirs_exist_ok=True
+                    )
+            else:
+                # Copy entire module if no deployment type specified
+                shutil.copytree(
+                    module_path, dest_module_path, dirs_exist_ok=True
+                )
 
 
 def bucket_exists(bucket_name: str, project_id: str) -> bool:
@@ -95,7 +152,9 @@ def generate_unique_bucket_name(base_name: str, project_id: str) -> str:
         str: A unique bucket name.
     """
     while True:
-        suffix = ''.join(random.choices(string.ascii_lowercase + string.digits, k=6))
+        suffix = "".join(
+            random.choices(string.ascii_lowercase + string.digits, k=6)
+        )
         new_name = f"{base_name}-{suffix}"
         if not bucket_exists(new_name, project_id):
             return new_name
@@ -115,8 +174,10 @@ def generate_bucket_name(project_id: str) -> str:
         word = random.choice(ANIMAL_NAMES)
     else:
         word = random.choice(FALLBACK_WORDS)
-    suffix = ''.join(random.choices(string.ascii_lowercase + string.digits, k=4))
-    return f"{word}-bucket-{project_id}-{suffix}".replace('_', '-')
+    suffix = "".join(
+        random.choices(string.ascii_lowercase + string.digits, k=4)
+    )
+    return f"{word}-bucket-{project_id}-{suffix}".replace("_", "-")
 
 
 def estimate_terraform_time(plan_output: str, operation: str = "apply") -> str:
@@ -125,8 +186,11 @@ def estimate_terraform_time(plan_output: str, operation: str = "apply") -> str:
     If PostgreSQL/Cloud SQL is present, estimate 20 minutes per instance.
     """
     import re
+
     # Match google_sql_database_instance resources even inside modules
-    postgres_resource_pattern = r'#.*google_sql_database_instance\.[^ ]+ will be created'
+    postgres_resource_pattern = (
+        r"#.*google_sql_database_instance\.[^ ]+ will be created"
+    )
     postgres_resources = set(re.findall(postgres_resource_pattern, plan_output))
     postgres_count = len(postgres_resources)
     if postgres_count > 0:
@@ -135,9 +199,9 @@ def estimate_terraform_time(plan_output: str, operation: str = "apply") -> str:
     # Otherwise, estimate by resource count
     resource_patterns = [
         r"# (\w+\.\w+) will be created",
-        r"# (\w+\.\w+) will be destroyed", 
+        r"# (\w+\.\w+) will be destroyed",
         r"# (\w+\.\w+) will be updated",
-        r"# (\w+\.\w+) will be replaced"
+        r"# (\w+\.\w+) will be replaced",
     ]
     resource_count = 0
     for pattern in resource_patterns:
@@ -159,41 +223,54 @@ def cleanup_cloud_sql_resources(terraform_dir: Path, project_id: str):
     Clean up Cloud SQL database and user before destroying the instance.
     """
     import subprocess
+
     try:
         # Get the instance name from terraform state
         result = subprocess.run(
-            ["terraform", "output", "-raw", "instance_connection_name"], 
-            cwd=terraform_dir, 
-            capture_output=True, 
-            text=True
+            ["terraform", "output", "-raw", "instance_connection_name"],
+            cwd=terraform_dir,
+            capture_output=True,
+            text=True,
         )
         if result.returncode == 0:
             instance_name = result.stdout.strip()
             # Extract instance name from connection name (format: project:region:instance)
-            instance_parts = instance_name.split(':')
+            instance_parts = instance_name.split(":")
             if len(instance_parts) == 3:
                 instance_name = instance_parts[2]
-                
+
                 print("🗄️  Cleaning up Cloud SQL database and user...")
-                
+
                 # Drop the database first
                 drop_db_cmd = [
-                    "gcloud", "sql", "databases", "delete", "mlflow",
-                    "--instance", instance_name,
-                    "--project", project_id,
-                    "--quiet"
+                    "gcloud",
+                    "sql",
+                    "databases",
+                    "delete",
+                    "mlflow",
+                    "--instance",
+                    instance_name,
+                    "--project",
+                    project_id,
+                    "--quiet",
                 ]
                 subprocess.run(drop_db_cmd, capture_output=True, text=True)
-                
+
                 # Drop the user
                 drop_user_cmd = [
-                    "gcloud", "sql", "users", "delete", "mlflow",
-                    "--instance", instance_name,
-                    "--project", project_id,
-                    "--quiet"
+                    "gcloud",
+                    "sql",
+                    "users",
+                    "delete",
+                    "mlflow",
+                    "--instance",
+                    instance_name,
+                    "--project",
+                    project_id,
+                    "--quiet",
                 ]
                 subprocess.run(drop_user_cmd, capture_output=True, text=True)
-                
+
                 print("✅ Cloud SQL cleanup completed")
     except Exception as e:
         print(f"⚠️  Cloud SQL cleanup failed (continuing with destroy): {e}")
@@ -204,13 +281,14 @@ def cleanup_terraform_files(terraform_dir: Path):
     Clean up Terraform state and lock files from the specified directory.
     """
     import shutil
+
     cleanup_files = [
         ".terraform",
-        "terraform.tfstate", 
+        "terraform.tfstate",
         "terraform.tfstate.backup",
-        ".terraform.lock.hcl"
+        ".terraform.lock.hcl",
     ]
-    
+
     for file in cleanup_files:
         file_path = terraform_dir / file
         if file_path.exists():
@@ -219,7 +297,7 @@ def cleanup_terraform_files(terraform_dir: Path):
             else:
                 file_path.unlink()
             print(f"🗑️  Removed: {file}")
-    
+
     print("✅ Cleanup completed")
 
 
@@ -241,7 +319,7 @@ def run_terraform_with_loading_bar(cmd, cwd, estimated_minutes, stack=None):
         "DeployML: Creating resources, please hold on...",
         "DeployML: Almost there! Just a few more steps...",
         "DeployML: Wrapping up the deployment for you...",
-        "DeployML: All done! Reviewing the results..."
+        "DeployML: All done! Reviewing the results...",
     ]
 
     # If stack is provided, build contextual messages
@@ -262,10 +340,12 @@ def run_terraform_with_loading_bar(cmd, cwd, estimated_minutes, stack=None):
         TextColumn("[progress.description]{task.description}"),
         BarColumn(),
         TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
-        TimeElapsedColumn()
+        TimeElapsedColumn(),
     ) as progress:
         task = progress.add_task(resource_msgs[0], total=100)
-        process = subprocess.Popen(cmd, cwd=cwd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        process = subprocess.Popen(
+            cmd, cwd=cwd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+        )
         start_time = time.time()
         estimated_seconds = estimated_minutes * 60
         n_msgs = len(resource_msgs)
@@ -273,9 +353,13 @@ def run_terraform_with_loading_bar(cmd, cwd, estimated_minutes, stack=None):
             elapsed = time.time() - start_time
             progress_percent = min(95, int((elapsed / estimated_seconds) * 100))
             # Choose message based on progress
-            msg_idx = min(int(progress_percent / (100 / (n_msgs - 1))), n_msgs - 2)
+            msg_idx = min(
+                int(progress_percent / (100 / (n_msgs - 1))), n_msgs - 2
+            )
             message = resource_msgs[msg_idx]
-            progress.update(task, completed=progress_percent, description=message)
+            progress.update(
+                task, completed=progress_percent, description=message
+            )
             time.sleep(1)
         progress.update(task, completed=100, description=resource_msgs[-1])
-        return process.returncode 
+        return process.returncode

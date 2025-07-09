@@ -45,6 +45,7 @@ import json
 
 cli = typer.Typer()
 
+
 @cli.command()
 def doctor():
     """
@@ -89,27 +90,50 @@ def doctor():
             "\n✅ GCP CLI ☁️  installed and authenticated", fg=typer.colors.GREEN
         )
         # Check enabled GCP APIs
-        project_id = typer.prompt("Enter your GCP Project ID to check enabled APIs", default="", show_default=False)
+        project_id = typer.prompt(
+            "Enter your GCP Project ID to check enabled APIs",
+            default="",
+            show_default=False,
+        )
         if project_id:
-            typer.echo(f"\n🔎 Checking enabled APIs for project: {project_id} ...")
+            typer.echo(
+                f"\n🔎 Checking enabled APIs for project: {project_id} ..."
+            )
             result = subprocess.run(
                 [
-                    "gcloud", "services", "list", "--enabled", "--project", project_id, "--format=value(config.name)"
+                    "gcloud",
+                    "services",
+                    "list",
+                    "--enabled",
+                    "--project",
+                    project_id,
+                    "--format=value(config.name)",
                 ],
-                capture_output=True, text=True
+                capture_output=True,
+                text=True,
             )
             if result.returncode != 0:
                 typer.echo("❌ Failed to list enabled APIs.")
             else:
                 enabled_apis = set(result.stdout.strip().splitlines())
-                missing_apis = [api for api in REQUIRED_GCP_APIS if api not in enabled_apis]
+                missing_apis = [
+                    api for api in REQUIRED_GCP_APIS if api not in enabled_apis
+                ]
                 if not missing_apis:
-                    typer.secho("✅ All required GCP APIs are enabled.", fg=typer.colors.GREEN)
+                    typer.secho(
+                        "✅ All required GCP APIs are enabled.",
+                        fg=typer.colors.GREEN,
+                    )
                 else:
-                    typer.secho("⚠️  The following required APIs are NOT enabled:", fg=typer.colors.YELLOW)
+                    typer.secho(
+                        "⚠️  The following required APIs are NOT enabled:",
+                        fg=typer.colors.YELLOW,
+                    )
                     for api in missing_apis:
                         typer.echo(f"  - {api}")
-                    typer.echo("You can enable them with: deployml init --provider gcp --project-id <PROJECT_ID>")
+                    typer.echo(
+                        "You can enable them with: deployml init --provider gcp --project-id <PROJECT_ID>"
+                    )
     elif gcp_installed:
         typer.secho(
             "\n⚠️ GCP CLI ⛈️  installed but not authenticated",
@@ -298,10 +322,10 @@ def deploy(
         # Find artifact_bucket in stack config
         for stage in config.get("stack", []):
             for stage_name, tool in stage.items():
-                if (
-                    stage_name == "artifact_tracking"
-                    and tool.get("name") in ["mlflow", "wandb"]
-                ):
+                if stage_name == "artifact_tracking" and tool.get("name") in [
+                    "mlflow",
+                    "wandb",
+                ]:
                     if "params" not in tool:
                         tool["params"] = {}
                     if not tool["params"].get("artifact_bucket"):
@@ -341,7 +365,9 @@ def deploy(
                                 tool["params"]["create_artifact_bucket"] = True
                     # Set use_postgres param based on backend_store_uri (mlflow only)
                     if tool.get("name") == "mlflow":
-                        backend_uri = tool["params"].get("backend_store_uri", "")
+                        backend_uri = tool["params"].get(
+                            "backend_store_uri", ""
+                        )
                         tool["params"]["use_postgres"] = backend_uri.startswith(
                             "postgresql"
                         )
@@ -358,12 +384,12 @@ def deploy(
     DEPLOYML_TERRAFORM_DIR.mkdir(parents=True, exist_ok=True)
     DEPLOYML_MODULES_DIR.mkdir(parents=True, exist_ok=True)
 
-    typer.echo("📦 Copying module templates...")
-    copy_modules_to_workspace(DEPLOYML_MODULES_DIR)
-
     region = config["provider"]["region"]
     deployment_type = config["deployment"]["type"]
     stack = config["stack"]
+
+    typer.echo("📦 Copying module templates...")
+    copy_modules_to_workspace(DEPLOYML_MODULES_DIR, stack, deployment_type)
 
     # Ensure all stages use Cloud SQL if any stage needs it
     needs_postgres = any(
@@ -380,14 +406,30 @@ def deploy(
     env = Environment(loader=FileSystemLoader(TEMPLATE_DIR))
     # PATCH: Use wandb_main.tf.j2 or mlflow_main.tf.j2 for cloud_run if present
     if deployment_type == "cloud_run":
-        if any(tool.get("name") == "wandb" for stage in stack for tool in stage.values()):
-            main_template = env.get_template(f"{cloud}/{deployment_type}/wandb_main.tf.j2")
-        elif any(tool.get("name") == "mlflow" for stage in stack for tool in stage.values()):
-            main_template = env.get_template(f"{cloud}/{deployment_type}/mlflow_main.tf.j2")
+        if any(
+            tool.get("name") == "wandb"
+            for stage in stack
+            for tool in stage.values()
+        ):
+            main_template = env.get_template(
+                f"{cloud}/{deployment_type}/wandb_main.tf.j2"
+            )
+        elif any(
+            tool.get("name") == "mlflow"
+            for stage in stack
+            for tool in stage.values()
+        ):
+            main_template = env.get_template(
+                f"{cloud}/{deployment_type}/mlflow_main.tf.j2"
+            )
         else:
-            main_template = env.get_template(f"{cloud}/{deployment_type}/main.tf.j2")
+            main_template = env.get_template(
+                f"{cloud}/{deployment_type}/main.tf.j2"
+            )
     else:
-        main_template = env.get_template(f"{cloud}/{deployment_type}/main.tf.j2")
+        main_template = env.get_template(
+            f"{cloud}/{deployment_type}/main.tf.j2"
+        )
     var_template = env.get_template(
         f"{cloud}/{deployment_type}/variables.tf.j2"
     )
@@ -700,8 +742,12 @@ def status():
 
 @cli.command()
 def init(
-    provider: str = typer.Option(..., "--provider", "-p", help="Cloud provider: gcp, aws, or azure"),
-    project_id: str = typer.Option("", "--project-id", "-j", help="Project ID (for GCP)"),
+    provider: str = typer.Option(
+        ..., "--provider", "-p", help="Cloud provider: gcp, aws, or azure"
+    ),
+    project_id: str = typer.Option(
+        "", "--project-id", "-j", help="Project ID (for GCP)"
+    ),
 ):
     """
     Initialize cloud project by enabling required APIs/services before deployment.
@@ -710,19 +756,32 @@ def init(
         if not project_id:
             typer.echo("❌ --project-id is required for GCP.")
             raise typer.Exit(code=1)
-        typer.echo(f"🔑 Enabling required GCP APIs for project: {project_id} ...")
-        result = subprocess.run([
-            "gcloud", "services", "enable", *REQUIRED_GCP_APIS, "--project", project_id
-        ])
+        typer.echo(
+            f"🔑 Enabling required GCP APIs for project: {project_id} ..."
+        )
+        result = subprocess.run(
+            [
+                "gcloud",
+                "services",
+                "enable",
+                *REQUIRED_GCP_APIS,
+                "--project",
+                project_id,
+            ]
+        )
         if result.returncode == 0:
             typer.echo("✅ All required GCP APIs are enabled.")
         else:
             typer.echo("❌ Failed to enable one or more GCP APIs.")
             raise typer.Exit(code=1)
     elif provider == "aws":
-        typer.echo("No API enablement required for AWS. Ensure IAM permissions are set.")
+        typer.echo(
+            "No API enablement required for AWS. Ensure IAM permissions are set."
+        )
     elif provider == "azure":
-        typer.echo("No API enablement required for most Azure services. Register providers if needed.")
+        typer.echo(
+            "No API enablement required for most Azure services. Register providers if needed."
+        )
     else:
         typer.echo(f"❌ Unknown provider: {provider}")
         raise typer.Exit(code=1)
