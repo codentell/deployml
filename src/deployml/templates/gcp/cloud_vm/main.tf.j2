@@ -83,14 +83,14 @@ resource "null_resource" "api_readiness_check" {
       echo "Verifying Compute Engine API is ready..."
       for i in {1..5}; do
         if gcloud compute zones list --project={{ project_id }} --limit=1 --format="value(name)" 2>/dev/null | grep -q .; then
-          echo "✅ Compute Engine API is ready!"
+          echo "Compute Engine API is ready!"
           exit 0
         else
-          echo "⏳ Attempt $i: API still propagating, waiting 30s..."
+          echo "Attempt $i: API still propagating, waiting 30s..."
           sleep 30
         fi
       done
-      echo "❌ API readiness check failed, but continuing..."
+      echo "API readiness check failed, but continuing..."
       exit 0
     EOT
   }
