@@ -30,4 +30,4 @@ stack:
   - model_registry:
       name: mlflow
       params: 
-        backend_store_uri: sqlite:///mlflow.db 
+        backend_store_uri: sqlite:///mlflow.db  # SQLite backend (local file) 
