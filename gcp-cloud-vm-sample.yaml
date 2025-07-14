@@ -1,7 +1,7 @@
 name: gcp-mlops-stack-mlflow-vm
 provider:
   name: gcp
-  project_id: mlops-intro-461805
+  project_id: hatchet9
   region: us-west2
   zone: us-west2-a
 
@@ -30,4 +30,4 @@ stack:
   - model_registry:
       name: mlflow
       params: 
-        backend_store_uri: sqlite:///mlflow.db 
+        backend_store_uri: sqlite:///mlflow.db  # SQLite backend (local file) 

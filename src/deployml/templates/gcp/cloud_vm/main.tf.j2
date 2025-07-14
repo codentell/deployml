@@ -1,46 +1,43 @@
+{% if create_artifact_bucket %}
+{% for stage in stack %}
+  {% for stage_name, tool in stage.items() %}
+    {% if tool.params.get("artifact_bucket") %}
+resource "google_storage_bucket" "{{ stage_name }}_{{ tool.name }}_artifact" {
+  name          = var.artifact_bucket
+  location      = var.region
+  force_destroy = true
+
+  labels = {
+    component  = "{{ tool.name }}-artifacts"
+    managed-by = "terraform"
+    stage      = "{{ stage_name }}"
+  }
+}
+    {% endif %}
+  {% endfor %}
+{% endfor %}
+{% endif %}
+
 provider "google" {
   project = "{{ project_id }}"
   region  = "{{ region }}"
   zone    = "{{ zone }}"
 }
 
+# Detect PostgreSQL and collect MLflow configuration from all stages
+{% set flags = namespace(needs_postgres=false, first_tool_name="", mlflow_params={}) %}
 {% for stage in stack %}
   {% for stage_name, tool in stage.items() %}
-    {% if stage_name == 'experiment_tracking' and tool.name in ['mlflow', 'wandb'] %}
-module "{{ stage_name }}_{{ tool.name }}" {
-  source     = "./modules/{{ tool.name }}/cloud/gcp/cloud_vm"
-  project_id = var.project_id
-  region     = var.region
-  zone       = var.zone
-  create_service = var.create_service
-  create_bucket  = var.create_bucket
-  service_name   = var.service_name
-  vm_name        = var.vm_name
-  machine_type   = var.machine_type
-  disk_size_gb   = var.disk_size_gb
-  disk_type      = var.disk_type
-  image_family   = var.image_family
-  artifact_bucket = var.artifact_bucket
-  allow_public_access = var.allow_public_access
-  network        = var.network
-  subnetwork     = var.subnetwork
-  allow_http_https = var.allow_http_https
-  tags           = var.tags
-  metadata       = var.metadata
-  startup_script = var.startup_script
-  {% if tool.name == 'mlflow' %}
-  backend_store_uri = var.backend_store_uri
-  image             = var.image
-  mlflow_port       = var.mlflow_port
-  use_postgres      = var.use_postgres
-  cloudsql_instance_annotation = var.cloudsql_instance_annotation
-  enable_https      = var.enable_https
-  service_account_email = var.service_account_email
-  {% elif tool.name == 'wandb' %}
-  wandb_port        = var.wandb_port
-  service_account_email = var.service_account_email
-  {% endif %}
-}
+    {% if tool.name == "mlflow" %}
+      {% for key, value in tool.params.items() %}
+        {% set _ = flags.mlflow_params.update({key: value}) %}
+      {% endfor %}
+      {% if tool.params.get("backend_store_uri", "") == "postgresql" %}
+        {% set flags.needs_postgres = true %}
+        {% if not flags.first_tool_name %}
+          {% set flags.first_tool_name = tool.name %}
+        {% endif %}
+      {% endif %}
     {% endif %}
   {% endfor %}
 {% endfor %}
@@ -56,6 +53,12 @@ resource "google_project_service" "required_apis" {
     "monitoring.googleapis.com",                # Cloud Monitoring
     "serviceusage.googleapis.com",              # Service Usage (for enabling APIs)
     "cloudresourcemanager.googleapis.com",     # Cloud Resource Manager (project operations)
+    {% if flags.needs_postgres %}
+    "sqladmin.googleapis.com",                  # Cloud SQL Admin API (for PostgreSQL)
+    "sql-component.googleapis.com",             # Cloud SQL component API
+    "servicenetworking.googleapis.com",         # For private service connections
+    "cloudkms.googleapis.com",                  # For encryption keys (if using CMEK)
+    {% endif %}
   ])
 
   project = "{{ project_id }}"
@@ -80,13 +83,18 @@ resource "null_resource" "api_readiness_check" {
   
   provisioner "local-exec" {
     command = <<-EOT
-      echo "Verifying Compute Engine API is ready..."
+      echo "Verifying {{ 'Compute Engine and Cloud SQL APIs' if flags.needs_postgres else 'Compute Engine API' }} are ready..."
       for i in {1..5}; do
+        {% if flags.needs_postgres %}
+        if gcloud compute zones list --project={{ project_id }} --limit=1 --format="value(name)" 2>/dev/null | grep -q . && \
+           gcloud sql instances list --project={{ project_id }} --limit=1 --format="value(name)" 2>/dev/null; then
+        {% else %}
         if gcloud compute zones list --project={{ project_id }} --limit=1 --format="value(name)" 2>/dev/null | grep -q .; then
-          echo "✅ Compute Engine API is ready!"
+        {% endif %}
+          echo "✅ APIs are ready!"
           exit 0
         else
-          echo "⏳ Attempt $i: API still propagating, waiting 30s..."
+          echo "⏳ Attempt $i: APIs still propagating, waiting 30s..."
           sleep 30
         fi
       done
@@ -95,6 +103,60 @@ resource "null_resource" "api_readiness_check" {
     EOT
   }
 }
+
+# Create Cloud SQL PostgreSQL instance if needed
+{% if flags.needs_postgres %}
+# Random password for the database
+resource "random_password" "db_password" {
+  length  = 16
+  special = true
+  override_special = "!#$*+-.=_"
+}
+
+# Cloud SQL PostgreSQL instance
+resource "google_sql_database_instance" "postgres" {
+  name             = "{{ flags.first_tool_name }}-postgres-{{ project_id }}"
+  database_version = "POSTGRES_14"
+  region           = var.region
+  project          = var.project_id
+  depends_on       = [null_resource.api_readiness_check]
+
+  settings {
+    tier = "db-f1-micro"
+    ip_configuration {
+      authorized_networks {
+        value = "0.0.0.0/0"
+      }
+      ipv4_enabled = true
+    }
+  }
+
+  deletion_protection = false
+}
+
+# Database within the instance
+resource "google_sql_database" "db" {
+  name     = "{{ flags.first_tool_name }}"
+  instance = google_sql_database_instance.postgres.name
+  project  = var.project_id
+  depends_on = [google_sql_database_instance.postgres]
+}
+
+# Database user
+resource "google_sql_user" "users" {
+  name     = "{{ flags.first_tool_name }}"
+  instance = google_sql_database_instance.postgres.name
+  password = random_password.db_password.result
+  project  = var.project_id
+  depends_on = [google_sql_database_instance.postgres]
+}
+
+# Note: If terraform destroy fails with "role cann       ot be dropped because some objects depend on it",
+# this is because MLflow created tables/objects owned by the user. To fix:
+# 1. Connect to the database: gcloud sql connect {{ flags.first_tool_name }}-postgres-{{ project_id }} --user={{ flags.first_tool_name }}
+# 2. Run: DROP OWNED BY {{ flags.first_tool_name }} CASCADE;
+# 3. Then retry terraform destroy
+{% endif %}
 
 # Storage bucket - only create if explicitly requested
 resource "google_storage_bucket" "artifact" {
@@ -122,22 +184,19 @@ resource "google_service_account" "vm_service_account" {
   depends_on = [null_resource.api_readiness_check]
 }
 
-# Define a Google Compute Engine instance for MLflow (conditional)
-{% for stage in stack %}
-  {% for stage_name, tool in stage.items() %}
-    {% if stage_name == 'experiment_tracking' and tool.name == 'mlflow' %}
+# Define a Google Compute Engine instance
 resource "google_compute_instance" "mlflow_vm" {
-  name         = "{{ stack[0].experiment_tracking.params.vm_name }}"
-  machine_type = "{{ stack[0].experiment_tracking.params.machine_type }}"
+  name         = "{{ flags.mlflow_params.vm_name }}"
+  machine_type = "{{ flags.mlflow_params.machine_type }}"
   zone         = "{{ zone }}"
 
   # Explicit dependency to ensure APIs are ready FIRST
-  depends_on = [null_resource.api_readiness_check]
+  depends_on = [null_resource.api_readiness_check{% if flags.needs_postgres %}, google_sql_database_instance.postgres, google_sql_database.db, google_sql_user.users{% endif %}]
 
   boot_disk {
     initialize_params {
       image = "debian-cloud/debian-12"
-      size  = {{ stack[0].experiment_tracking.params.disk_size_gb }}
+      size  = {{ flags.mlflow_params.disk_size_gb }}
       type  = "pd-standard"
     }
   }
@@ -156,9 +215,9 @@ resource "google_compute_instance" "mlflow_vm" {
   }
 
   # Startup script to install Docker and deploy MLflow
-  metadata = merge(var.metadata, {
+  metadata = {
     startup-script = local.default_startup_script
-  })
+  }
 
   tags = ["mlflow-server"]
 
@@ -168,8 +227,24 @@ resource "google_compute_instance" "mlflow_vm" {
 
 # Local variables for startup script
 locals {
+  {% if flags.needs_postgres %}
+  # Use PostgreSQL connection string from the direct resources
+  postgres_connection_string = "postgresql+psycopg2://${google_sql_user.users.name}:${random_password.db_password.result}@${google_sql_database_instance.postgres.public_ip_address}:5432/${google_sql_database.db.name}"
+  backend_store_uri = "postgresql+psycopg2://${google_sql_user.users.name}:${random_password.db_password.result}@${google_sql_database_instance.postgres.public_ip_address}:5432/${google_sql_database.db.name}"
+  {% else %}
+  # Use SQLite for default backend
+  backend_store_uri = "sqlite:///mlflow.db"
+  {% endif %}
+
   default_startup_script = <<-EOF
     #!/bin/bash
+    set -e
+    
+    echo "Starting MLflow VM setup{{ ' with PostgreSQL backend' if flags.needs_postgres else '' }}..."
+    
+    # Log all output to a file for debugging
+    exec > >(tee /var/log/mlflow-startup.log) 2>&1
+    
     echo "$(date): Starting MLflow VM setup..."
     
     # Get the current user dynamically
@@ -196,7 +271,8 @@ locals {
       build-essential \
       git \
       wget \
-      unzip
+      unzip{% if flags.needs_postgres %} \
+      postgresql-client{% endif %}
     
     # Verify Python and pip are available
     echo "Verifying Python installation..."
@@ -246,8 +322,8 @@ locals {
     pip install --upgrade pip setuptools wheel
     
     # Install MLflow and dependencies
-    echo "Installing MLflow..."
-    pip install mlflow[extras] sqlalchemy psycopg2-binary
+    echo "Installing MLflow{{ ' with PostgreSQL support' if flags.needs_postgres else '' }}..."
+    pip install mlflow[extras] sqlalchemy{% if flags.needs_postgres %} psycopg2-binary{% endif %}
     
     # Verify MLflow installation
     echo "Verifying MLflow installation..."
@@ -259,22 +335,46 @@ locals {
     
     # Set up environment variables
     export MLFLOW_SERVER_HOST=0.0.0.0
-    export MLFLOW_SERVER_PORT={{ stack[0].experiment_tracking.params.mlflow_port }}
+    export MLFLOW_SERVER_PORT=5000
+    export MLFLOW_BACKEND_STORE_URI="${local.backend_store_uri}"
     
-    {% if stack[2].model_registry.params.backend_store_uri %}
-    if [ -n "{{ stack[2].model_registry.params.backend_store_uri }}" ]; then
-      export MLFLOW_BACKEND_STORE_URI={{ stack[2].model_registry.params.backend_store_uri }}
-    fi
-    {% endif %}
-    {% if stack[1].artifact_tracking.params.artifact_bucket %}
-    export MLFLOW_DEFAULT_ARTIFACT_ROOT=gs://{{ stack[1].artifact_tracking.params.artifact_bucket }}
-    {% endif %}
+         {% if flags.needs_postgres %}
+     # Test PostgreSQL connection
+     echo "Testing PostgreSQL connection..."
+     python3 -c "
+import psycopg2
+from urllib.parse import urlparse
+
+connection_string = '${local.postgres_connection_string}'
+print('Testing connection to PostgreSQL...')
+try:
+    parsed = urlparse(connection_string)
+    conn = psycopg2.connect(
+        host=parsed.hostname,
+        port=parsed.port or 5432,
+        database=parsed.path[1:],  # Remove leading slash
+        user=parsed.username,
+        password=parsed.password
+    )
+    conn.close()
+    print('PostgreSQL connection successful!')
+except Exception as e:
+    print(f'PostgreSQL connection failed: {e}')
+    exit(1)
+"
+     {% endif %}
+     
+     {% if flags.mlflow_params.get('artifact_bucket') %}
+     if [ -n "{{ flags.mlflow_params.artifact_bucket }}" ]; then
+       export MLFLOW_DEFAULT_ARTIFACT_ROOT=gs://{{ flags.mlflow_params.artifact_bucket }}
+     fi
+     {% endif %}
     
     # Create systemd service for MLflow
-    echo "Creating MLflow systemd service..."
+    echo "Creating MLflow systemd service{{ ' with PostgreSQL backend' if flags.needs_postgres else '' }}..."
     sudo tee /etc/systemd/system/mlflow.service > /dev/null <<SERVICE_EOF
 [Unit]
-Description=MLflow Server
+Description=MLflow Server{{ ' with PostgreSQL Backend' if flags.needs_postgres else '' }}
 After=network.target
 
 [Service]
@@ -284,29 +384,54 @@ Group=$CURRENT_USER
 WorkingDirectory=/home/$CURRENT_USER
 Environment=PATH=/home/$CURRENT_USER/mlflow-env/bin
 Environment=MLFLOW_SERVER_HOST=0.0.0.0
-Environment=MLFLOW_SERVER_PORT={{ stack[0].experiment_tracking.params.mlflow_port }}
-{% if stack[2].model_registry.params.backend_store_uri %}
-Environment=MLFLOW_BACKEND_STORE_URI={{ stack[2].model_registry.params.backend_store_uri }}
+Environment=MLFLOW_SERVER_PORT=5000
+Environment=MLFLOW_BACKEND_STORE_URI=${local.backend_store_uri}
+{% if flags.mlflow_params.get('artifact_bucket') %}
+Environment=MLFLOW_DEFAULT_ARTIFACT_ROOT=gs://{{ flags.mlflow_params.artifact_bucket }}
 {% endif %}
-{% if stack[1].artifact_tracking.params.artifact_bucket %}
-Environment=MLFLOW_DEFAULT_ARTIFACT_ROOT=gs://{{ stack[1].artifact_tracking.params.artifact_bucket }}
-{% endif %}
-ExecStart=/home/$CURRENT_USER/mlflow-env/bin/mlflow server --host 0.0.0.0 --port {{ stack[0].experiment_tracking.params.mlflow_port }}
+ExecStart=/home/$CURRENT_USER/mlflow-env/bin/mlflow server --host 0.0.0.0 --port {{ flags.mlflow_params.mlflow_port }} --backend-store-uri ${local.backend_store_uri}
 Restart=always
 RestartSec=10
 StandardOutput=journal
 StandardError=journal
-SERVICE_EOF
 
-    # Reload systemd and start MLflow service
-    echo "Starting MLflow service..."
-    sudo systemctl daemon-reload
-    sudo systemctl enable mlflow
-    sudo systemctl start mlflow
+[Install]
+WantedBy=multi-user.target
+SERVICE_EOF
     
-    echo "MLflow VM setup complete!"
-    echo "MLflow should be accessible at: http://$(curl -s ifconfig.me):{{ stack[0].experiment_tracking.params.mlflow_port }}"
-  EOF
+    # Set proper permissions
+    sudo chown -R $CURRENT_USER:$CURRENT_USER /home/$CURRENT_USER/mlflow-config
+    sudo chown -R $CURRENT_USER:$CURRENT_USER /home/$CURRENT_USER/mlflow-data
+    
+    # Enable and start MLflow service
+    echo "Enabling and starting MLflow service..."
+    sudo systemctl daemon-reload
+    sudo systemctl enable mlflow.service
+    sudo systemctl start mlflow.service
+    
+    # Check service status
+    echo "Checking MLflow service status..."
+    sudo systemctl status mlflow.service --no-pager
+    
+    # Wait for MLflow to start
+    echo "Waiting for MLflow server to start..."
+    sleep 30
+    
+    # Test MLflow server
+    echo "Testing MLflow server..."
+    curl -f http://localhost:5000/health || echo "MLflow server health check failed, but continuing..."
+    
+         echo "MLflow VM setup{{ ' with PostgreSQL backend' if flags.needs_postgres else '' }} completed successfully!"
+     echo "MLflow server should be accessible at http://$(curl -s http://metadata.google.internal/computeMetadata/v1/instance/network-interfaces/0/access-configs/0/external-ip -H 'Metadata-Flavor: Google'):{{ flags.mlflow_params.mlflow_port }}"
+     echo "Backend store: {{ 'PostgreSQL' if flags.needs_postgres else 'SQLite' }}"
+     {% if flags.mlflow_params.get('artifact_bucket') %}
+     echo "Artifact store: gs://{{ flags.mlflow_params.artifact_bucket }}"
+     {% endif %}
+    
+    # Log final status
+    echo "$(date): MLflow VM setup completed!"
+    
+EOF
 }
 
 # Firewall rules for MLflow access
@@ -319,14 +444,14 @@ resource "google_compute_firewall" "allow_mlflow" {
   
   allow {
     protocol = "tcp"
-    ports    = ["{{ stack[0].experiment_tracking.params.mlflow_port }}"]
+    ports    = ["{{ flags.mlflow_params.mlflow_port }}"]
   }
   source_ranges = ["0.0.0.0/0"]
   target_tags   = ["mlflow-server"]
 }
 
 # Firewall rules for HTTP/HTTPS (if needed)
-{% if stack[0].experiment_tracking.params.allow_public_access %}
+{% if flags.mlflow_params.get("allow_public_access", false) %}
 resource "google_compute_firewall" "allow_http_https" {
   name    = "allow-http-https"
   network = "default"
@@ -358,60 +483,63 @@ resource "google_compute_firewall" "allow_lb_health_checks" {
 }
 {% endif %}
 
-# Outputs for MLflow
+# Outputs
 output "vm_external_ip" {
   value = google_compute_instance.mlflow_vm.network_interface[0].access_config[0].nat_ip
 }
 
 output "mlflow_url" {
-  value = "http://${google_compute_instance.mlflow_vm.network_interface[0].access_config[0].nat_ip}:{{ stack[0].experiment_tracking.params.mlflow_port }}"
+  value = "http://${google_compute_instance.mlflow_vm.network_interface[0].access_config[0].nat_ip}:{{ flags.mlflow_params.mlflow_port }}"
 }
 
 output "service_url" {
-  value = "http://${google_compute_instance.mlflow_vm.network_interface[0].access_config[0].nat_ip}:{{ stack[0].experiment_tracking.params.mlflow_port }}"
-}
-
-output "bucket_name" {
-  value = "{{ stack[1].artifact_tracking.params.artifact_bucket }}"
+  value = "http://${google_compute_instance.mlflow_vm.network_interface[0].access_config[0].nat_ip}:{{ flags.mlflow_params.mlflow_port }}"
 }
 
 output "vm_name" {
-  value = "{{ stack[0].experiment_tracking.params.vm_name }}"
-}
-
-output "zone" {
-  value = "{{ zone }}"
+  value = "{{ flags.mlflow_params.vm_name }}"
 }
 
 output "ssh_command" {
-  value = "gcloud compute ssh --zone {{ zone }} {{ stack[0].experiment_tracking.params.vm_name }}"
+  value = "gcloud compute ssh --zone {{ zone }} {{ flags.mlflow_params.vm_name }}"
 }
-    {% endif %}
-  {% endfor %}
-{% endfor %}
 
-# Outputs for experiment_tracking (generic for both tools)
-{% for stage in stack %}
-  {% for stage_name, tool in stage.items() %}
-    {% if stage_name == 'experiment_tracking' and tool.name in ['mlflow', 'wandb'] %}
-output "{{ stage_name }}_{{ tool.name }}_url" {
-  value = module.{{ stage_name }}_{{ tool.name }}.service_url
+# Artifact bucket output  
+{% if flags.mlflow_params.get("artifact_bucket") %}
+output "bucket_name" {
+  value = "{{ flags.mlflow_params.artifact_bucket }}"
 }
-output "{{ stage_name }}_{{ tool.name }}_bucket" {
-  value = module.{{ stage_name }}_{{ tool.name }}.bucket_name
+{% endif %}
+
+# Zone output
+output "deployment_zone" {
+  value = "{{ zone }}"
 }
-output "{{ stage_name }}_{{ tool.name }}_vm_name" {
-  value = module.{{ stage_name }}_{{ tool.name }}.vm_name
+
+
+
+{% if flags.needs_postgres %}
+output "instance_connection_name" {
+  value = google_sql_database_instance.postgres.connection_name
+  description = "Cloud SQL instance connection name"
 }
-output "{{ stage_name }}_{{ tool.name }}_zone" {
-  value = module.{{ stage_name }}_{{ tool.name }}.zone
+
+output "postgresql_credentials" {
+  value = {
+    db_user                  = google_sql_user.users.name
+    db_password              = random_password.db_password.result
+    db_name                  = google_sql_database.db.name
+    db_public_ip             = google_sql_database_instance.postgres.public_ip_address
+    instance_connection_name = google_sql_database_instance.postgres.connection_name
+    connection_string        = "postgresql+psycopg2://${google_sql_user.users.name}:${random_password.db_password.result}@${google_sql_database_instance.postgres.public_ip_address}:5432/${google_sql_database.db.name}"
+  }
+  sensitive = true
+  description = "PostgreSQL database credentials"
 }
-output "{{ stage_name }}_{{ tool.name }}_ssh_command" {
-  value = module.{{ stage_name }}_{{ tool.name }}.ssh_command
+
+output "db_connection_string" {
+  value = "postgresql+psycopg2://${google_sql_user.users.name}:${random_password.db_password.result}@${google_sql_database_instance.postgres.public_ip_address}:5432/${google_sql_database.db.name}"
+  sensitive = true
+  description = "PostgreSQL connection string"
 }
-output "{{ stage_name }}_{{ tool.name }}_external_ip" {
-  value = module.{{ stage_name }}_{{ tool.name }}.vm_external_ip
-}
-    {% endif %}
-  {% endfor %}
-{% endfor %}
+{% endif %}

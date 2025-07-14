@@ -6,3 +6,5 @@ poetry.lock
 terraform.tfstate
 terraform.tfstate.backup
 .deployml
+
+working_Version

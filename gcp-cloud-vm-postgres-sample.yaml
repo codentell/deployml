@@ -1,0 +1,34 @@
+name: gcp-mlops-stack-mlflow-vm-postgres
+provider:
+  name: gcp
+  project_id: hatchet9
+  region: us-west1
+  zone: us-west1-a
+
+cost_analysis:
+  enabled: true              # Enable/disable cost analysis (default: true)
+  warning_threshold: 100.0   # Warn if monthly cost exceeds this amount (default: 100.0)
+  currency: "USD"   
+
+deployment:
+  type: cloud_vm
+
+stack:
+  - experiment_tracking:
+      name: mlflow
+      params:
+        service_name: mlflow-server-postgres-vm
+        vm_name: mlflow-postgres-vm-instance
+        machine_type: e2-standard-2  # Larger instance for database workload
+        disk_size_gb: 30
+        mlflow_port: 5000
+        allow_public_access: true
+  - artifact_tracking:
+      name: mlflow
+      params: 
+        artifact_bucket: mlflow-artifact-bucket-postgres-12345
+        create_bucket: true
+  - model_registry:
+      name: mlflow
+      params: 
+        backend_store_uri: postgresql  # This triggers automatic Cloud SQL PostgreSQL creation
