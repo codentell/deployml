@@ -29,6 +29,17 @@ deployml integrates with [infracost](https://www.infracost.io/) to provide cost 
 ```bash
 brew install infracost
 ```
+Once installed you will need to create a free [infracost](https://www.infracost.io/) account before creating your API key. 
+
+To generate your infracost API key run the following command:
+
+```bash
+infracost auth login
+```
+If you want to retrieve your API key use:
+```bash
+infracost configure get api_key
+```
 
 ### Cost Analysis Configuration
 Add cost analysis settings to your YAML configuration:
