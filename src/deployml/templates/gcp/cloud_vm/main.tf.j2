@@ -1,49 +1,28 @@
+{% if create_artifact_bucket %}
+{% for stage in stack %}
+  {% for stage_name, tool in stage.items() %}
+    {% if tool.params.get("artifact_bucket") %}
+resource "google_storage_bucket" "{{ stage_name }}_{{ tool.name }}_artifact" {
+  name          = var.artifact_bucket
+  location      = var.region
+  force_destroy = true
+
+  labels = {
+    component  = "{{ tool.name }}-artifacts"
+    managed-by = "terraform"
+    stage      = "{{ stage_name }}"
+  }
+}
+    {% endif %}
+  {% endfor %}
+{% endfor %}
+{% endif %}
+
 provider "google" {
   project = "{{ project_id }}"
   region  = "{{ region }}"
   zone    = "{{ zone }}"
 }
-
-{% for stage in stack %}
-  {% for stage_name, tool in stage.items() %}
-    {% if stage_name == 'experiment_tracking' and tool.name in ['mlflow', 'wandb'] %}
-module "{{ stage_name }}_{{ tool.name }}" {
-  source     = "./modules/{{ tool.name }}/cloud/gcp/cloud_vm"
-  project_id = var.project_id
-  region     = var.region
-  zone       = var.zone
-  create_service = var.create_service
-  create_bucket  = var.create_bucket
-  service_name   = var.service_name
-  vm_name        = var.vm_name
-  machine_type   = var.machine_type
-  disk_size_gb   = var.disk_size_gb
-  disk_type      = var.disk_type
-  image_family   = var.image_family
-  artifact_bucket = var.artifact_bucket
-  allow_public_access = var.allow_public_access
-  network        = var.network
-  subnetwork     = var.subnetwork
-  allow_http_https = var.allow_http_https
-  tags           = var.tags
-  metadata       = var.metadata
-  startup_script = var.startup_script
-  {% if tool.name == 'mlflow' %}
-  backend_store_uri = var.backend_store_uri
-  image             = var.image
-  mlflow_port       = var.mlflow_port
-  use_postgres      = var.use_postgres
-  cloudsql_instance_annotation = var.cloudsql_instance_annotation
-  enable_https      = var.enable_https
-  service_account_email = var.service_account_email
-  {% elif tool.name == 'wandb' %}
-  wandb_port        = var.wandb_port
-  service_account_email = var.service_account_email
-  {% endif %}
-}
-    {% endif %}
-  {% endfor %}
-{% endfor %}
 
 # Enable required Google Cloud APIs for fresh project
 resource "google_project_service" "required_apis" {
@@ -122,10 +101,7 @@ resource "google_service_account" "vm_service_account" {
   depends_on = [null_resource.api_readiness_check]
 }
 
-# Define a Google Compute Engine instance for MLflow (conditional)
-{% for stage in stack %}
-  {% for stage_name, tool in stage.items() %}
-    {% if stage_name == 'experiment_tracking' and tool.name == 'mlflow' %}
+# Define a Google Compute Engine instance
 resource "google_compute_instance" "mlflow_vm" {
   name         = "{{ stack[0].experiment_tracking.params.vm_name }}"
   machine_type = "{{ stack[0].experiment_tracking.params.machine_type }}"
@@ -266,8 +242,11 @@ locals {
       export MLFLOW_BACKEND_STORE_URI={{ stack[2].model_registry.params.backend_store_uri }}
     fi
     {% endif %}
+    
     {% if stack[1].artifact_tracking.params.artifact_bucket %}
-    export MLFLOW_DEFAULT_ARTIFACT_ROOT=gs://{{ stack[1].artifact_tracking.params.artifact_bucket }}
+    if [ -n "{{ stack[1].artifact_tracking.params.artifact_bucket }}" ]; then
+      export MLFLOW_DEFAULT_ARTIFACT_ROOT=gs://{{ stack[1].artifact_tracking.params.artifact_bucket }}
+    fi
     {% endif %}
     
     # Create systemd service for MLflow
@@ -358,7 +337,7 @@ resource "google_compute_firewall" "allow_lb_health_checks" {
 }
 {% endif %}
 
-# Outputs for MLflow
+# Outputs
 output "vm_external_ip" {
   value = google_compute_instance.mlflow_vm.network_interface[0].access_config[0].nat_ip
 }
@@ -386,32 +365,3 @@ output "zone" {
 output "ssh_command" {
   value = "gcloud compute ssh --zone {{ zone }} {{ stack[0].experiment_tracking.params.vm_name }}"
 }
-    {% endif %}
-  {% endfor %}
-{% endfor %}
-
-# Outputs for experiment_tracking (generic for both tools)
-{% for stage in stack %}
-  {% for stage_name, tool in stage.items() %}
-    {% if stage_name == 'experiment_tracking' and tool.name in ['mlflow', 'wandb'] %}
-output "{{ stage_name }}_{{ tool.name }}_url" {
-  value = module.{{ stage_name }}_{{ tool.name }}.service_url
-}
-output "{{ stage_name }}_{{ tool.name }}_bucket" {
-  value = module.{{ stage_name }}_{{ tool.name }}.bucket_name
-}
-output "{{ stage_name }}_{{ tool.name }}_vm_name" {
-  value = module.{{ stage_name }}_{{ tool.name }}.vm_name
-}
-output "{{ stage_name }}_{{ tool.name }}_zone" {
-  value = module.{{ stage_name }}_{{ tool.name }}.zone
-}
-output "{{ stage_name }}_{{ tool.name }}_ssh_command" {
-  value = module.{{ stage_name }}_{{ tool.name }}.ssh_command
-}
-output "{{ stage_name }}_{{ tool.name }}_external_ip" {
-  value = module.{{ stage_name }}_{{ tool.name }}.vm_external_ip
-}
-    {% endif %}
-  {% endfor %}
-{% endfor %}

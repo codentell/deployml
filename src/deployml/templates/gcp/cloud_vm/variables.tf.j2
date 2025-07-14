@@ -18,15 +18,15 @@ variable "zone" {
 
 # --- Service Configuration ---
 variable "create_service" {
-  description = "Whether to create the experiment tracking service"
+  description = "Whether to create the MLflow service"
   type        = bool
   default     = true
 }
 
 variable "service_name" {
-  description = "Name for the experiment tracking service container"
+  description = "Name for the MLflow service container"
   type        = string
-  default     = "{{ stack[0].experiment_tracking.name }}-server"
+  default     = "mlflow-server"
 }
 
 variable "create_bucket" {
@@ -39,7 +39,7 @@ variable "create_bucket" {
 variable "vm_name" {
   description = "Name for the VM instance"
   type        = string
-  default     = "{{ stack[0].experiment_tracking.name }}-vm"
+  default     = "mlflow-vm"
 }
 
 variable "machine_type" {
@@ -66,8 +66,7 @@ variable "image_family" {
   default     = "debian-cloud/debian-12"
 }
 
-# --- Tool-specific Configuration ---
-{% if stack[0].experiment_tracking.name == 'mlflow' %}
+# --- MLflow Configuration ---
 variable "artifact_bucket" {
   description = "GCS bucket for storing MLflow artifacts"
   type        = string
@@ -103,29 +102,16 @@ variable "cloudsql_instance_annotation" {
   type        = string
   default     = ""
 }
-{% elif stack[0].experiment_tracking.name == 'wandb' %}
-variable "artifact_bucket" {
-  description = "GCS bucket for storing wandb artifacts"
-  type        = string
-  default     = ""
-}
-
-variable "wandb_port" {
-  description = "Port for wandb server"
-  type        = number
-  default     = 8080
-}
-{% endif %}
 
 # --- Network and Security ---
 variable "allow_public_access" {
-  description = "Whether to allow public access to the experiment tracking UI"
+  description = "Whether to allow public access to MLflow UI"
   type        = bool
   default     = true
 }
 
 variable "enable_https" {
-  description = "Whether to enable HTTPS for the experiment tracking server"
+  description = "Whether to enable HTTPS for MLflow"
   type        = bool
   default     = false
 }
@@ -151,7 +137,7 @@ variable "allow_http_https" {
 variable "tags" {
   description = "Network tags for the VM"
   type        = list(string)
-  default     = ["{{ stack[0].experiment_tracking.name }}-server", "http-server", "https-server"]
+  default     = ["mlflow-server", "http-server", "https-server"]
 }
 
 # --- Identity and Access ---
@@ -175,8 +161,9 @@ variable "startup_script" {
 }
 
 # --- Dynamic Variables from YAML ---
+# Add any extra YAML params as string variables if not already defined
 {%- set defined = [
-  "project_id", "region", "zone", "create_service", "create_bucket", "service_name", "vm_name", "machine_type", "disk_size_gb", "disk_type", "image_family", "artifact_bucket", "backend_store_uri", "image", "allow_public_access", "mlflow_port", "wandb_port", "enable_https", "service_account_email", "network", "subnetwork", "allow_http_https", "use_postgres", "cloudsql_instance_annotation", "tags", "metadata", "startup_script"
+  "project_id", "region", "zone", "create_service", "create_bucket", "service_name", "vm_name", "machine_type", "disk_size_gb", "disk_type", "image_family", "artifact_bucket", "backend_store_uri", "image", "allow_public_access", "mlflow_port", "enable_https", "service_account_email", "network", "subnetwork", "allow_http_https", "use_postgres", "cloudsql_instance_annotation", "tags", "metadata", "startup_script"
 ] -%}
 {%- set seen = [] -%}
 {% for stage in stack %}
