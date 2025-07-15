@@ -182,3 +182,22 @@ variable "create_artifact_bucket" {
   default     = true
 }
 
+# --- Explicit variables for model_serving_fastapi ---
+variable "model_serving_fastapi_service_name" {
+  description = "Service name for FastAPI model serving"
+  type        = string
+  default     = ""
+}
+
+variable "model_serving_fastapi_image" {
+  description = "Docker image for FastAPI model serving"
+  type        = string
+  default     = ""
+}
+
+variable "model_uri" {
+  description = "Model URI for FastAPI"
+  type        = string
+  default     = ""
+}
+

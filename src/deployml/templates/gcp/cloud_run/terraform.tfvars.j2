@@ -39,7 +39,9 @@ backend_store_uri = "{{ backend_uri }}"
 artifact_bucket = "{{ tool.params.get('artifact_bucket', '') }}"
     {% endif %}
     {% for key, value in tool.params.items() %}
-      {% if key == "image" %}
+      {% if key == "mlflow_tracking_uri" %}
+mlflow_tracking_uri = {{ value }}
+      {% elif key == "image" %}
 {{ stage_name }}_{{ tool.name }}_image = "{{ value }}"
       {% elif key == "bucket_exists" %}
 bucket_exists = {{ value | lower }}

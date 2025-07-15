@@ -388,6 +388,24 @@ def deploy(
     deployment_type = config["deployment"]["type"]
     stack = config["stack"]
 
+    # --- PATCH: Ensure cloud_sql_postgres module is copied for mlflow cloud_run with postgres ---
+    if (
+        cloud == "gcp"
+        and deployment_type == "cloud_run"
+        and any(
+            tool.get("name") == "mlflow" and tool.get("params", {}).get("backend_store_uri", "").startswith("postgresql")
+            for stage in stack
+            for tool in stage.values()
+        )
+    ):
+        # Only add if not already present
+        if not any(
+            tool.get("name") == "cloud_sql_postgres"
+            for stage in stack
+            for tool in stage.values()
+        ):
+            stack.append({"cloud_sql_postgres": {"name": "cloud_sql_postgres", "params": {}}})
+            
     typer.echo("📦 Copying module templates...")
     copy_modules_to_workspace(DEPLOYML_MODULES_DIR, stack, deployment_type)
 

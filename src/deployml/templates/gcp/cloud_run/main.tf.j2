@@ -54,6 +54,15 @@ module "cloud_sql_postgres" {
 
 {% for stage in stack %}
   {% for stage_name, tool in stage.items() %}
+    {% set is_model_serving = (stage_name == "model_serving") %}
+    {% set has_mlflow_tracking = false %}
+    {% for s in stack %}
+      {% for sn, t in s.items() %}
+        {% if sn == "experiment_tracking" and t.name == "mlflow" %}
+          {% set has_mlflow_tracking = true %}
+        {% endif %}
+      {% endfor %}
+    {% endfor %}
 module "{{ stage_name }}_{{ tool.name }}" {
   source = "./modules/{{ tool.name }}/cloud/{{ cloud }}/{{ deployment_type }}"
   count  = var.enable_{{ stage_name }}_{{ tool.name }} ? 1 : 0
@@ -99,6 +108,9 @@ module "{{ stage_name }}_{{ tool.name }}" {
       {{ key }} = var.{{ key }}
     {% endif %}
   {% endfor %}
+  {% if is_model_serving and has_mlflow_tracking %}
+  mlflow_tracking_uri = module.experiment_tracking_mlflow[0].service_url
+  {% endif %}
 }
   {% endfor %}
 {% endfor %}

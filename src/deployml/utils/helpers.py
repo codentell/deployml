@@ -92,6 +92,13 @@ def copy_modules_to_workspace(
     # Only copy the modules that are being used, and only the specific deployment type
     for module_path in MODULE_TEMPLATES_DIR.iterdir():
         if module_path.is_dir() and module_path.name in used_modules:
+            # Special case: always copy full cloud_sql_postgres module
+            if module_path.name == "cloud_sql_postgres":
+                dest_module_path = modules_dir / module_path.name
+                if dest_module_path.exists():
+                    shutil.rmtree(dest_module_path)
+                shutil.copytree(module_path, dest_module_path)
+                continue
             # Create the destination module directory
             dest_module_path = modules_dir / module_path.name
             if dest_module_path.exists():
