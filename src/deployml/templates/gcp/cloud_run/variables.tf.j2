@@ -168,11 +168,18 @@ variable "{{ stage_name }}_{{ tool.name }}_image" {
 # Control variables for module behavior
 {% for stage in stack %}
   {% for stage_name, tool in stage.items() %}
-variable "enable_{{ stage_name }}_{{ tool.name }}" {
-  description = "Enable/disable {{ stage_name }}_{{ tool.name }} module"
-  type        = bool
-  default     = true
+    {% if stage_name in ["experiment_tracking", "model_serving"] and 'service_name' in tool.params %}
+variable "{{ stage_name }}_{{ tool.name }}_service_name" {
+  description = "Service name for {{ stage_name }}_{{ tool.name }}"
+  type        = string
+  default     = ""
 }
+    {% endif %}
+    variable "enable_{{ stage_name }}_{{ tool.name }}" {
+      description = "Enable/disable {{ stage_name }}_{{ tool.name }} module"
+      type        = bool
+      default     = true
+    }
   {% endfor %}
 {% endfor %}
 
@@ -182,18 +189,7 @@ variable "create_artifact_bucket" {
   default     = true
 }
 
-# --- Explicit variables for model_serving_fastapi ---
-variable "model_serving_fastapi_service_name" {
-  description = "Service name for FastAPI model serving"
-  type        = string
-  default     = ""
-}
 
-variable "model_serving_fastapi_image" {
-  description = "Docker image for FastAPI model serving"
-  type        = string
-  default     = ""
-}
 
 variable "model_uri" {
   description = "Model URI for FastAPI"

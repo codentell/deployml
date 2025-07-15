@@ -8,7 +8,6 @@ deployment:
 stack:
   - experiment_tracking:
       name: mlflow
-      # name: wandb
       params:
        image: gcr.io/mlops-intro-461805/mlflow/mlflow:latest
        service_name: mlflow-server 
@@ -19,7 +18,6 @@ stack:
         # cpu_limit: 1000m   # Add this line
   - artifact_tracking:
       name: mlflow
-      # name: wandb
       params: 
         image: gcr.io/mlops-intro-461805/mlflow/mlflow:latest
         # image: gcr.io/mlops-intro-461805/wandb/wandb:latest
@@ -34,5 +32,7 @@ stack:
         # backend_store_uri: postgresql
   - model_serving:
       name: fastapi
-      image: gcr.io/mlops-intro-461805/fastapi/fastapi:latest
+      params:
+        image: gcr.io/mlops-intro-461805/fastapi/fastapi:latest
+        service_name: fastapi-mlflow-server-postgres
         

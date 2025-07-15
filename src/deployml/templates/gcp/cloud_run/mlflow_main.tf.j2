@@ -51,7 +51,7 @@ module "cloud_sql_postgres" {
     {% if tool.name == "mlflow" %}
 module "{{ stage_name }}_mlflow" {
   source = "./modules/mlflow/cloud/gcp/cloud_run"
-  count  = var.enable_{{ stage_name }}_mlflow ? 1 : 0
+  count  = var.enable_{{ stage_name }}_mlflow{% if stage_name in ["experiment_tracking", "model_serving"] %} && var.{{ stage_name }}_mlflow_service_name != ""{% endif %} ? 1 : 0
   project_id = var.project_id
   region     = var.region
   create_service = {% if stage_name == "experiment_tracking" %}true{% else %}false{% endif %}
@@ -80,10 +80,15 @@ module "{{ stage_name }}_mlflow" {
       image = var.{{ stage_name }}_mlflow_image != "" ? var.{{ stage_name }}_mlflow_image : var.global_image
     {% elif key == "artifact_bucket" %}
       # Skip - already handled above
+    {% elif key == "service_name" and stage_name in ["experiment_tracking", "model_serving"] %}
+      # Skip - handled separately below
     {% elif key not in resource_params and key != "create_artifact_bucket" and key != "backend_store_uri" and key != "use_postgres" %}
       {{ key }} = var.{{ key }}
     {% endif %}
   {% endfor %}
+  {% if stage_name in ["experiment_tracking", "model_serving"] %}
+  service_name = var.{{ stage_name }}_mlflow_service_name
+  {% endif %}
 }
     {% endif %}
   {% endfor %}
@@ -146,4 +151,15 @@ output "postgresql_credentials" {
   sensitive = true
 }
 {% endif %}
+
+# Output for FastAPI model serving if present
+{% for stage in stack %}
+  {% for stage_name, tool in stage.items() %}
+    {% if stage_name == "model_serving" and tool.name == "fastapi" %}
+output "{{ stage_name }}_{{ tool.name }}_url" {
+  value = length(module.{{ stage_name }}_{{ tool.name }}) > 0 ? module.{{ stage_name }}_{{ tool.name }}.service_url : ""
+}
+    {% endif %}
+  {% endfor %}
+{% endfor %}
 {% endblock %} 

@@ -35,16 +35,19 @@ backend_store_uri = "{{ backend_uri }}"
 
 {% for stage in stack %}
   {% for stage_name, tool in stage.items() %}
-    {% if stage_name == "artifact_tracking" %}
-artifact_bucket = "{{ tool.params.get('artifact_bucket', '') }}"
-    {% endif %}
     {% for key, value in tool.params.items() %}
-      {% if key == "mlflow_tracking_uri" %}
+      {% if key == "service_name" and stage_name in ["experiment_tracking", "model_serving"] %}
+{{ stage_name }}_{{ tool.name }}_service_name = "{{ value }}"
+      {% elif key == "service_name" %}
+        {# Do not emit a generic service_name variable for other stages #}
+      {% elif key == "mlflow_tracking_uri" %}
 mlflow_tracking_uri = {{ value }}
       {% elif key == "image" %}
 {{ stage_name }}_{{ tool.name }}_image = "{{ value }}"
       {% elif key == "bucket_exists" %}
 bucket_exists = {{ value | lower }}
+      {% elif key == "artifact_bucket" %}
+artifact_bucket = "{{ tool.params.get('artifact_bucket', '') }}"
       {% elif key not in ["cpu_limit", "memory_limit", "cpu_request", "memory_request", "max_scale", "container_concurrency", "artifact_bucket", "create_artifact_bucket", "backend_store_uri"] %}
 {{ key }} = "{{ value }}"
       {% endif %}
