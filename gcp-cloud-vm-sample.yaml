@@ -17,10 +17,10 @@ stack:
   - experiment_tracking:
       name: mlflow
       params:
-        service_name: mlflow-server-vm
-        # service_name: mlflow-server-postgres-vm # for postgres backend
-        vm_name: mlflow-vm-instance
-        # vm_name: mlflow-postgres-vm-instance # for postgres backend
+        # service_name: mlflow-server-vm
+        service_name: mlflow-server-postgres-vm # for postgres backend
+        # vm_name: mlflow-vm-instance
+        vm_name: mlflow-postgres-vm-instance # for postgres backend
         machine_type: e2-medium
         disk_size_gb: 20
         mlflow_port: 5000
@@ -31,11 +31,11 @@ stack:
   - artifact_tracking:
       name: mlflow
       params: 
-        artifact_bucket: mlflow-artifact-bucket-vm-54321
-        # artifact_bucket: mlflow-artifact-bucket-postgres-12345 # for postgres backend
+        # artifact_bucket: mlflow-artifact-bucket-vm-54321
+        artifact_bucket: mlflow-artifact-bucket-postgres-12345 # for postgres backend
         create_bucket: true
   - model_registry:
       name: mlflow
       params: 
-        backend_store_uri: sqlite:///mlflow.db  # SQLite backend (local file)
-        # backend_store_uri: postgresql # for postgres backend
+        # backend_store_uri: sqlite:///mlflow.db  # SQLite backend (local file)
+        backend_store_uri: postgresql # for postgres backend

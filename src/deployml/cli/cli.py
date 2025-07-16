@@ -553,7 +553,7 @@ def deploy(
         import re as _re
 
         match = _re.search(r"~(\d+)", estimated_time)
-        minutes = int(match.group(1)) if match else 5
+        minutes = int(match.group(1)) if match else 8  # Increased default for API operations
         result_code = run_terraform_with_loading_bar(
             ["terraform", "apply", "-auto-approve"],
             DEPLOYML_TERRAFORM_DIR,
