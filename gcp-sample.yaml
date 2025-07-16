@@ -30,9 +30,9 @@ stack:
         backend_store_uri: postgresql
         # backend_store_uri: sqlite
         # backend_store_uri: postgresql
-  - model_serving:
-      name: fastapi
-      params:
-        image: gcr.io/mlops-intro-461805/fastapi/fastapi:latest
-        service_name: fastapi-mlflow-server-postgres
+  # - model_serving:
+  #     name: fastapi
+  #     params:
+  #       image: gcr.io/mlops-intro-461805/fastapi/fastapi:latest
+  #       service_name: fastapi-mlflow-server-postgres
         

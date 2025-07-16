@@ -1,3 +1,5 @@
+data "google_project" "current" {}
+
 resource "google_cloud_run_service" "fastapi" {
   name     = var.service_name
   location = var.region
@@ -5,6 +7,7 @@ resource "google_cloud_run_service" "fastapi" {
 
   template {
     spec {
+      service_account_name = "${data.google_project.current.number}-compute@developer.gserviceaccount.com"
       containers {
         image = var.image
         env {
@@ -41,4 +44,10 @@ resource "google_cloud_run_service_iam_member" "public" {
   service  = google_cloud_run_service.fastapi.name
   role     = "roles/run.invoker"
   member   = "allUsers"
+}
+
+resource "google_project_iam_member" "fastapi_storage_object_viewer" {
+  project = var.project_id
+  role    = "roles/storage.objectViewer"
+  member  = "serviceAccount:${data.google_project.current.number}-compute@developer.gserviceaccount.com"
 } 

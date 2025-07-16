@@ -41,7 +41,7 @@ resource "google_cloud_run_service" "mlflow" {
         
         env {
           name  = "MLFLOW_SERVER_PORT"
-          value = "5000"
+          value = "8080"
         }
         
         # Backend store URI
@@ -60,7 +60,7 @@ resource "google_cloud_run_service" "mlflow" {
         }
 
         ports {
-          container_port = 5000
+          container_port = 8080
         }
         
         resources {
