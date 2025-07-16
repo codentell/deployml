@@ -31,6 +31,13 @@ resource "google_sql_database" "db" {
   depends_on = [google_sql_database_instance.postgres]
 }
 
+resource "google_sql_database" "feast_db" {
+  name     = "feast"
+  instance = google_sql_database_instance.postgres.name
+  project  = var.project_id
+  depends_on = [google_sql_database_instance.postgres]
+}
+
 resource "google_sql_user" "users" {
   name     = var.db_user
   instance = google_sql_database_instance.postgres.name

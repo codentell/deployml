@@ -108,6 +108,10 @@ module "{{ stage_name }}_{{ tool.name }}" {
     length(module.experiment_tracking_mlflow) > 0 ?
     module.experiment_tracking_mlflow[0].service_url : ""
   )
+  mlflow_artifact_bucket = (
+    length(module.experiment_tracking_mlflow) > 0 ?
+    module.experiment_tracking_mlflow[0].bucket_name : var.artifact_bucket
+  )
   model_uri           = var.model_uri
   cpu_limit           = var.cpu_limit
   memory_limit        = var.memory_limit

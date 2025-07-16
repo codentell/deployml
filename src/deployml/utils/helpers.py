@@ -203,6 +203,17 @@ def estimate_terraform_time(plan_output: str, operation: str = "apply") -> str:
     if postgres_count > 0:
         total_minutes = 20 * postgres_count
         return f"~{total_minutes} minutes (Cloud SQL/PostgreSQL detected)"
+
+    # Check for API propagation wait time
+    if "time_sleep.wait_for_api_propagation" in plan_output:
+        base_wait_time = 3  # Account for API propagation (2 min) + buffer
+    else:
+        base_wait_time = 0
+
+    # Check for VM deployments (these take longer)
+    if "google_compute_instance" in plan_output:
+        base_wait_time += 3  # VMs take additional time for startup scripts
+
     # Otherwise, estimate by resource count
     resource_patterns = [
         r"# (\w+\.\w+) will be created",
@@ -213,15 +224,17 @@ def estimate_terraform_time(plan_output: str, operation: str = "apply") -> str:
     resource_count = 0
     for pattern in resource_patterns:
         resource_count += len(re.findall(pattern, plan_output))
+
     if resource_count == 0:
-        return "~1 minute"
+        return f"~{max(1, base_wait_time)} minute{'s' if base_wait_time != 1 else ''}"
     elif resource_count <= 3:
         avg_time = 0.5
     elif resource_count <= 8:
         avg_time = 2
     else:
         avg_time = 5
-    estimated_minutes = max(1, int(resource_count * avg_time))
+
+    estimated_minutes = max(1, int(resource_count * avg_time) + base_wait_time)
     return f"~{estimated_minutes} minutes"
 
 
@@ -358,7 +371,14 @@ def run_terraform_with_loading_bar(cmd, cwd, estimated_minutes, stack=None):
         n_msgs = len(resource_msgs)
         while process.poll() is None:
             elapsed = time.time() - start_time
-            progress_percent = min(95, int((elapsed / estimated_seconds) * 100))
+            # More conservative progress calculation - don't hit 95% too early
+            if elapsed < estimated_seconds:
+                progress_percent = int((elapsed / estimated_seconds) * 85)
+            else:
+                # If we exceed estimated time, slowly approach 95%
+                excess_time = elapsed - estimated_seconds
+                progress_percent = min(95, 85 + int(excess_time / 30))  # +1% per 30 seconds
+            
             # Choose message based on progress
             msg_idx = min(
                 int(progress_percent / (100 / (n_msgs - 1))), n_msgs - 2

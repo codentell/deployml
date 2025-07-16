@@ -45,4 +45,10 @@ variable "allow_public_access" {
   type        = bool
   description = "Whether to allow public access to the FastAPI service"
   default     = true
+}
+
+variable "mlflow_artifact_bucket" {
+  type        = string
+  description = "MLflow artifact bucket name"
+  default     = ""
 } 

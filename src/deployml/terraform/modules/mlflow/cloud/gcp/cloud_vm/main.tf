@@ -134,60 +134,407 @@ locals {
     echo "Testing Docker installation..."
     sudo docker run --rm hello-world
     
-    # Set up MLflow environment
-    echo "Setting up MLflow environment..."
+    # Set up containerized MLflow environment
+    echo "Setting up containerized MLflow environment..."
     
-    # Create a Python virtual environment
-    echo "Creating Python virtual environment..."
-    python3 -m venv /home/$CURRENT_USER/mlflow-env
-    source /home/$CURRENT_USER/mlflow-env/bin/activate
+    # Create deployment directory structure
+    mkdir -p /home/$CURRENT_USER/deployml/docker
+    mkdir -p /home/$CURRENT_USER/deployml/docker/mlflow
+    mkdir -p /home/$CURRENT_USER/deployml/docker/fastapi
     
-    # Upgrade pip in the virtual environment
-    echo "Upgrading pip..."
-    pip install --upgrade pip setuptools wheel
+    # Create Docker Compose file
+    echo "Creating Docker Compose configuration..."
+    cat > /home/$CURRENT_USER/deployml/docker/docker-compose.yml << 'DOCKER_COMPOSE_EOF'
+version: '3.8'
+
+services:
+  mlflow:
+    build: 
+      context: ./mlflow
+      dockerfile: Dockerfile
+    container_name: mlflow-server
+    ports:
+      - "5000:5000"
+    environment:
+      - MLFLOW_BACKEND_STORE_URI=${var.backend_store_uri}
+      - MLFLOW_DEFAULT_ARTIFACT_ROOT=${var.artifact_bucket != "" ? "gs://${var.artifact_bucket}" : "./mlflow-artifacts"}
+      - MLFLOW_SERVER_HOST=0.0.0.0
+      - MLFLOW_SERVER_PORT=5000
+    volumes:
+      - mlflow-data:/app/mlflow-data
+      - mlflow-config:/app/mlflow-config
+    networks:
+      - mlflow-network
+    restart: unless-stopped
+    command: >
+      mlflow server 
+      --host 0.0.0.0 
+      --port 5000
+      --backend-store-uri ${var.backend_store_uri}
+      --default-artifact-root ${var.artifact_bucket != "" ? "gs://${var.artifact_bucket}" : "./mlflow-artifacts"}
     
-    # Install MLflow and dependencies
-    echo "Installing MLflow..."
-    pip install mlflow[extras] sqlalchemy psycopg2-binary
+  fastapi:
+    build:
+      context: ./fastapi
+      dockerfile: Dockerfile
+    container_name: fastapi-proxy
+    ports:
+      - "${var.fastapi_port}:8000"
+    environment:
+      - MLFLOW_BASE_URL=http://mlflow:5000
+      - FASTAPI_PORT=8000
+    depends_on:
+      - mlflow
+    networks:
+      - mlflow-network
+    restart: unless-stopped
+
+volumes:
+  mlflow-data:
+  mlflow-config:
+
+networks:
+  mlflow-network:
+    driver: bridge
+DOCKER_COMPOSE_EOF
+
+    # Create MLflow Dockerfile
+    echo "Creating MLflow Dockerfile..."
+    cat > /home/$CURRENT_USER/deployml/docker/mlflow/Dockerfile << 'MLFLOW_DOCKERFILE_EOF'
+FROM python:3.9-slim
+
+# Set working directory
+WORKDIR /app
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    curl \
+    postgresql-client \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Python dependencies
+RUN pip install --upgrade pip setuptools wheel
+
+# Install MLflow and dependencies
+RUN pip install \
+    mlflow[extras] \
+    sqlalchemy \
+    psycopg2-binary \
+    google-cloud-storage \
+    boto3
+
+# Create mlflow user
+RUN useradd -m -s /bin/bash mlflow
+
+# Create directories
+RUN mkdir -p /app/mlflow-data /app/mlflow-config
+RUN chown -R mlflow:mlflow /app
+
+# Switch to mlflow user
+USER mlflow
+
+# Expose MLflow port
+EXPOSE 5000
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
+    CMD curl -f http://localhost:5000/health || exit 1
+
+# Default command
+CMD ["mlflow", "server", "--host", "0.0.0.0", "--port", "5000"]
+MLFLOW_DOCKERFILE_EOF
+
+    # Create FastAPI Dockerfile
+    echo "Creating FastAPI Dockerfile..."
+    cat > /home/$CURRENT_USER/deployml/docker/fastapi/Dockerfile << 'FASTAPI_DOCKERFILE_EOF'
+FROM python:3.9-slim
+
+# Set working directory
+WORKDIR /app
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Python dependencies
+RUN pip install --upgrade pip setuptools wheel
+
+# Install FastAPI and dependencies
+RUN pip install \
+    fastapi \
+    uvicorn \
+    httpx
+
+# Create fastapi user
+RUN useradd -m -s /bin/bash fastapi
+
+# Create app directory
+RUN mkdir -p /app/fastapi-app
+RUN chown -R fastapi:fastapi /app
+
+# Copy FastAPI application
+COPY main.py /app/fastapi-app/main.py
+
+# Switch to fastapi user
+USER fastapi
+
+# Expose FastAPI port
+EXPOSE 8000
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
+    CMD curl -f http://localhost:8000/health || exit 1
+
+# Default command
+CMD ["uvicorn", "fastapi-app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+FASTAPI_DOCKERFILE_EOF
     
-    # Verify MLflow installation
-    echo "Verifying MLflow installation..."
-    mlflow --version
+
     
-    # Create MLflow configuration directory
-    mkdir -p /home/$CURRENT_USER/mlflow-config
-    mkdir -p /home/$CURRENT_USER/mlflow-data
+    # Setup FastAPI application
+    echo "Setting up FastAPI application..."
+    FASTAPI_SOURCE="${var.fastapi_app_source}"
     
-    # Set up environment variables
-    export MLFLOW_SERVER_HOST=0.0.0.0
-    export MLFLOW_SERVER_PORT=5000
+    if [ "$FASTAPI_SOURCE" = "template" ]; then
+        echo "Using default containerized FastAPI template..."
+        # Create a containerized FastAPI application with MLflow proxy
+        cat > /home/$CURRENT_USER/deployml/docker/fastapi/main.py << 'FASTAPI_TEMPLATE_EOF'
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import RedirectResponse, HTMLResponse
+from fastapi.middleware.cors import CORSMiddleware
+import httpx
+import os
+from contextlib import asynccontextmanager
+import logging
+import asyncio
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# MLflow configuration - use container name for inter-container communication
+MLFLOW_BASE_URL = os.getenv("MLFLOW_BASE_URL", "http://mlflow:5000")
+FASTAPI_PORT = int(os.getenv("FASTAPI_PORT", "8000"))
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Application lifespan events"""
+    logger.info("FastAPI MLflow Proxy starting...")
+    logger.info(f"Proxying requests to MLflow at: {MLFLOW_BASE_URL}")
     
-    if [ -n "${var.backend_store_uri}" ]; then
-      export MLFLOW_BACKEND_STORE_URI=${var.backend_store_uri}
+    # Wait for MLflow to be ready
+    logger.info("Waiting for MLflow to be ready...")
+    max_retries = 30
+    for i in range(max_retries):
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.get(f"{MLFLOW_BASE_URL}/health", timeout=5.0)
+                if response.status_code == 200:
+                    logger.info("✅ MLflow is ready!")
+                    break
+        except Exception as e:
+            logger.info(f"Waiting for MLflow... (attempt {i+1}/{max_retries})")
+            if i == max_retries - 1:
+                logger.error(f"❌ MLflow not ready after {max_retries} attempts: {e}")
+            await asyncio.sleep(2)
+    
+    yield
+    logger.info("FastAPI MLflow Proxy shutting down...")
+
+# Create FastAPI application
+app = FastAPI(
+    title="MLflow Proxy API",
+    description="Containerized FastAPI proxy for MLflow server",
+    version="1.0.0",
+    lifespan=lifespan
+)
+
+# Add CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+@app.get("/", response_class=HTMLResponse)
+async def root():
+    """Root endpoint with links to available services"""
+    html_content = """
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>MLflow Proxy API</title>
+        <style>
+            body { font-family: Arial, sans-serif; margin: 40px; }
+            h1 { color: #333; }
+            .links { margin: 20px 0; }
+            .link { display: block; padding: 10px; margin: 5px 0; background: #f0f0f0; text-decoration: none; border-radius: 5px; }
+            .link:hover { background: #e0e0e0; }
+            .container-info { background: #e7f3ff; padding: 15px; border-radius: 5px; margin: 20px 0; }
+        </style>
+    </head>
+    <body>
+        <h1>🚀 MLflow Proxy API</h1>
+        <div class="container-info">
+            <h3>🐳 Containerized Deployment</h3>
+            <p>This FastAPI proxy is running in a Docker container and communicating with MLflow via Docker networking.</p>
+            <p><strong>MLflow URL:</strong> """ + MLFLOW_BASE_URL + """</p>
+        </div>
+        <div class="links">
+            <a class="link" href="/mlflow">📊 MLflow UI</a>
+            <a class="link" href="/health">🏥 Health Check</a>
+            <a class="link" href="/docs">📚 API Documentation</a>
+            <a class="link" href="/container-info">🐳 Container Info</a>
+        </div>
+    </body>
+    </html>
+    """
+    return HTMLResponse(content=html_content)
+
+@app.get("/health")
+async def health_check():
+    """Health check endpoint"""
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(f"{MLFLOW_BASE_URL}/health", timeout=5.0)
+            if response.status_code == 200:
+                return {
+                    "status": "healthy",
+                    "mlflow": "connected",
+                    "mlflow_url": MLFLOW_BASE_URL,
+                    "proxy_port": FASTAPI_PORT,
+                    "deployment": "containerized"
+                }
+            else:
+                return {
+                    "status": "unhealthy",
+                    "mlflow": "disconnected",
+                    "mlflow_status_code": response.status_code,
+                    "deployment": "containerized"
+                }
+    except Exception as e:
+        logger.error(f"Health check failed: {e}")
+        return {
+            "status": "unhealthy",
+            "error": str(e),
+            "mlflow_url": MLFLOW_BASE_URL,
+            "deployment": "containerized"
+        }
+
+@app.get("/container-info")
+async def container_info():
+    """Container information endpoint"""
+    return {
+        "container_name": "fastapi-proxy",
+        "mlflow_container": "mlflow-server",
+        "mlflow_url": MLFLOW_BASE_URL,
+        "network": "mlflow-network",
+        "ports": {
+            "fastapi": FASTAPI_PORT,
+            "mlflow": 5000
+        }
+    }
+
+@app.get("/mlflow")
+async def mlflow_ui_redirect():
+    """Redirect to MLflow UI"""
+    return RedirectResponse(url=f"{MLFLOW_BASE_URL}/")
+
+@app.get("/mlflow/{path:path}")
+async def proxy_mlflow_ui(path: str, request: Request):
+    """Proxy MLflow UI requests"""
+    try:
+        query_params = str(request.url.query)
+        url = f"{MLFLOW_BASE_URL}/{path}"
+        if query_params:
+            url += f"?{query_params}"
+        
+        async with httpx.AsyncClient() as client:
+            response = await client.get(url, headers=dict(request.headers))
+            return response.content
+    except Exception as e:
+        logger.error(f"MLflow UI proxy error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.api_route("/api/2.0/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH"])
+async def proxy_mlflow_api(path: str, request: Request):
+    """Proxy MLflow API requests"""
+    try:
+        query_params = str(request.url.query)
+        url = f"{MLFLOW_BASE_URL}/api/2.0/{path}"
+        if query_params:
+            url += f"?{query_params}"
+        
+        async with httpx.AsyncClient() as client:
+            response = await client.request(
+                method=request.method,
+                url=url,
+                headers=dict(request.headers),
+                content=await request.body()
+            )
+            return response.content
+    except Exception as e:
+        logger.error(f"MLflow API proxy error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=FASTAPI_PORT)
+FASTAPI_TEMPLATE_EOF
+        echo "✅ Default FastAPI template created successfully!"
+    elif [[ "$FASTAPI_SOURCE" == gs://* ]]; then
+        echo "Downloading FastAPI application from GCS: $FASTAPI_SOURCE"
+        if gsutil cp "$FASTAPI_SOURCE" /home/$CURRENT_USER/deployml/docker/fastapi/main.py; then
+            echo "✅ FastAPI application downloaded successfully from GCS!"
+        else
+            echo "❌ ERROR: Failed to download FastAPI application from GCS: $FASTAPI_SOURCE"
+            echo "Please ensure the file exists and you have proper permissions."
+            exit 1
+        fi
+    elif [[ "$FASTAPI_SOURCE" == /* ]]; then
+        echo "Copying FastAPI application from local path: $FASTAPI_SOURCE"
+        if [ -f "$FASTAPI_SOURCE" ]; then
+            cp "$FASTAPI_SOURCE" /home/$CURRENT_USER/deployml/docker/fastapi/main.py
+            echo "✅ FastAPI application copied successfully!"
+        else
+            echo "❌ ERROR: FastAPI application not found at: $FASTAPI_SOURCE"
+            echo "Please provide a valid file path or use 'template' for the default application."
+            exit 1
+        fi
+    else
+        echo "❌ ERROR: Invalid FastAPI source: $FASTAPI_SOURCE"
+        echo "Supported sources:"
+        echo "  - 'template' for default FastAPI application"
+        echo "  - 'gs://bucket/path/main.py' for GCS file"
+        echo "  - '/absolute/path/main.py' for local file"
+        exit 1
     fi
+
+    # Set proper permissions
+    echo "Setting proper permissions for user: $CURRENT_USER"
+    sudo chown -R $CURRENT_USER:$CURRENT_USER /home/$CURRENT_USER/deployml
     
-    if [ -n "${var.artifact_bucket}" ]; then
-      export MLFLOW_DEFAULT_ARTIFACT_ROOT=gs://${var.artifact_bucket}
-    fi
-    
-    # Create systemd service for MLflow
-    echo "Creating MLflow systemd service..."
-    sudo tee /etc/systemd/system/mlflow.service > /dev/null <<SERVICE_EOF
+    # Create systemd service for Docker Compose
+    echo "Creating Docker Compose systemd service..."
+    sudo tee /etc/systemd/system/mlflow-docker.service > /dev/null <<DOCKER_SERVICE_EOF
 [Unit]
-Description=MLflow Server
-After=network.target
+Description=MLflow Docker Compose Stack
+After=network.target docker.service
+Requires=docker.service
 
 [Service]
-Type=simple
+Type=forking
 User=$CURRENT_USER
 Group=$CURRENT_USER
-WorkingDirectory=/home/$CURRENT_USER
-Environment=PATH=/home/$CURRENT_USER/mlflow-env/bin
-Environment=MLFLOW_SERVER_HOST=0.0.0.0
-Environment=MLFLOW_SERVER_PORT=5000
+WorkingDirectory=/home/$CURRENT_USER/deployml/docker
 Environment=MLFLOW_BACKEND_STORE_URI=${var.backend_store_uri}
-Environment=MLFLOW_DEFAULT_ARTIFACT_ROOT=gs://${var.artifact_bucket}
-ExecStart=/home/$CURRENT_USER/mlflow-env/bin/mlflow server --host 0.0.0.0 --port 5000
+Environment=MLFLOW_DEFAULT_ARTIFACT_ROOT=${var.artifact_bucket != "" ? "gs://${var.artifact_bucket}" : "./mlflow-artifacts"}
+ExecStart=/usr/bin/docker-compose up -d
+ExecStop=/usr/bin/docker-compose down
+ExecReload=/usr/bin/docker-compose restart
 Restart=always
 RestartSec=10
 StandardOutput=journal
@@ -195,49 +542,75 @@ StandardError=journal
 
 [Install]
 WantedBy=multi-user.target
-SERVICE_EOF
-    
-    # Set proper permissions
-    echo "Setting proper permissions for user: $CURRENT_USER"
-    sudo chown -R $CURRENT_USER:$CURRENT_USER /home/$CURRENT_USER/mlflow-env
-    sudo chown -R $CURRENT_USER:$CURRENT_USER /home/$CURRENT_USER/mlflow-config
-    sudo chown -R $CURRENT_USER:$CURRENT_USER /home/$CURRENT_USER/mlflow-data
-    
-    # Reload systemd and enable MLflow service
-    echo "Enabling and starting MLflow service..."
+DOCKER_SERVICE_EOF
+
+    # Reload systemd and enable Docker Compose service
+    echo "Enabling and starting Docker Compose service..."
     sudo systemctl daemon-reload
-    sudo systemctl enable mlflow.service
-    sudo systemctl start mlflow.service
+    sudo systemctl enable mlflow-docker.service
     
-    # Wait for MLflow to start
-    echo "Waiting for MLflow to start..."
-    sleep 20
+    # Build and start Docker containers
+    echo "Building Docker containers..."
+    cd /home/$CURRENT_USER/deployml/docker
+    sudo -u $CURRENT_USER docker-compose build
     
-    # Check if MLflow is running
-    echo "Checking MLflow service status..."
-    sudo systemctl status mlflow --no-pager
+    echo "Starting Docker containers..."
+    sudo systemctl start mlflow-docker.service
     
-    # Test MLflow locally
-    echo "Testing MLflow locally..."
-    for i in {1..5}; do
-      if curl -s http://localhost:5000 > /dev/null; then
-        echo "✅ MLflow server is running successfully!"
+    # Wait for containers to start
+    echo "Waiting for containers to start..."
+    sleep 30
+    
+    # Check Docker Compose service status
+    echo "Checking Docker Compose service status..."
+    sudo systemctl status mlflow-docker --no-pager
+    
+    # Check container status
+    echo "Checking container status..."
+    sudo -u $CURRENT_USER docker ps
+    
+    # Test MLflow container
+    echo "Testing MLflow container..."
+    for i in {1..10}; do
+      if curl -s http://localhost:5000/health > /dev/null; then
+        echo "✅ MLflow container is running successfully!"
         break
       else
-        echo "Attempt $i: MLflow server not responding yet..."
-        if [ $i -eq 5 ]; then
-          echo "⚠️  MLflow server may still be starting up..."
-          echo "Checking MLflow logs..."
-          sudo journalctl -u mlflow --no-pager -n 30
+        echo "Attempt $i: MLflow container not responding yet..."
+        if [ $i -eq 10 ]; then
+          echo "⚠️  MLflow container may still be starting up..."
+          echo "Checking MLflow container logs..."
+          sudo -u $CURRENT_USER docker logs mlflow-server
         fi
-        sleep 10
+        sleep 15
+      fi
+    done
+    
+    # Test FastAPI container
+    echo "Testing FastAPI container..."
+    for i in {1..10}; do
+      if curl -s http://localhost:${var.fastapi_port}/health > /dev/null; then
+        echo "✅ FastAPI container is running successfully!"
+        break
+      else
+        echo "Attempt $i: FastAPI container not responding yet..."
+        if [ $i -eq 10 ]; then
+          echo "⚠️  FastAPI container may still be starting up..."
+          echo "Checking FastAPI container logs..."
+          sudo -u $CURRENT_USER docker logs fastapi-proxy
+        fi
+        sleep 15
       fi
     done
     
     # Get external IP for display
     EXTERNAL_IP=$(curl -s http://metadata.google.internal/computeMetadata/v1/instance/network-interfaces/0/access-configs/0/external-ip -H "Metadata-Flavor: Google")
+    echo "🐳 Containerized MLflow deployment completed successfully!"
     echo "🌐 MLflow UI will be available at: http://$EXTERNAL_IP:${var.mlflow_port}"
+    echo "🚀 FastAPI Proxy will be available at: http://$EXTERNAL_IP:${var.fastapi_port}"
+    echo "📊 Container Info: http://$EXTERNAL_IP:${var.fastapi_port}/container-info"
     echo "🔧 SSH into the VM with: gcloud compute ssh ${var.vm_name} --zone=${var.zone}"
+    echo "🐳 Manage containers: docker ps, docker logs mlflow-server, docker logs fastapi-proxy"
     
     echo "$(date): VM setup completed successfully!"
     echo "Startup script completed successfully" | sudo tee /var/log/mlflow-startup-complete.log
@@ -255,6 +628,23 @@ resource "google_compute_firewall" "allow_mlflow" {
   allow {
     protocol = "tcp"
     ports    = [tostring(var.mlflow_port)]
+  }
+
+  source_ranges = ["0.0.0.0/0"]
+  target_tags   = ["mlflow-server"]
+}
+
+# Firewall rule to allow FastAPI traffic
+resource "google_compute_firewall" "allow_fastapi" {
+  count       = var.create_service && var.allow_public_access ? 1 : 0
+  name        = "allow-fastapi-vm"
+  network     = var.network
+  project     = var.project_id
+  description = "Allow FastAPI traffic to VM"
+
+  allow {
+    protocol = "tcp"
+    ports    = [tostring(var.fastapi_port)]
   }
 
   source_ranges = ["0.0.0.0/0"]
@@ -329,6 +719,33 @@ output "zone" {
 output "ssh_command" {
   description = "SSH command to connect to the VM"
   value       = var.create_service ? "gcloud compute ssh ${google_compute_instance.mlflow_vm[0].name} --zone=${google_compute_instance.mlflow_vm[0].zone}" : ""
+}
+
+output "fastapi_url" {
+  description = "URL to access FastAPI proxy"
+  value       = var.create_service ? "http://${google_compute_instance.mlflow_vm[0].network_interface[0].access_config[0].nat_ip}:${var.fastapi_port}" : ""
+}
+
+output "fastapi_health_url" {
+  description = "URL to check FastAPI health status"
+  value       = var.create_service ? "http://${google_compute_instance.mlflow_vm[0].network_interface[0].access_config[0].nat_ip}:${var.fastapi_port}/health" : ""
+}
+
+output "container_info_url" {
+  description = "URL to check container information"
+  value       = var.create_service ? "http://${google_compute_instance.mlflow_vm[0].network_interface[0].access_config[0].nat_ip}:${var.fastapi_port}/container-info" : ""
+}
+
+output "docker_commands" {
+  description = "Useful Docker commands for container management"
+  value = {
+    check_containers = "docker ps"
+    mlflow_logs      = "docker logs mlflow-server"
+    fastapi_logs     = "docker logs fastapi-proxy"
+    restart_services = "docker-compose restart"
+    stop_services    = "docker-compose down"
+    start_services   = "docker-compose up -d"
+  }
 }
 
 resource "google_storage_bucket_iam_member" "mlflow_vm_artifact_access" {

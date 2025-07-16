@@ -55,4 +55,8 @@ artifact_bucket = "{{ tool.params.get('artifact_bucket', '') }}"
   {% endfor %}
 {% endfor %}
 
-create_artifact_bucket = {{ create_artifact_bucket | lower }} 
+create_artifact_bucket = {{ create_artifact_bucket | lower }}
+
+# Feast-specific configuration
+feast_bigquery_dataset = "feast_offline_store"
+feast_create_bigquery_dataset = true 

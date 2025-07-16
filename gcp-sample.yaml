@@ -1,7 +1,7 @@
 name: gcp-mlops-stack-mlflow
 provider:
   name: gcp
-  project_id: deployml-2025
+  project_id: mlops-intro-461805
   region: us-west1
 deployment:
   type: cloud_run
@@ -9,7 +9,7 @@ stack:
   - experiment_tracking:
       name: mlflow
       params:
-       image: gcr.io/deployml-2025/mlflow/mlflow:latest
+       image: gcr.io/mlops-intro-461805/mlflow/mlflow:latest
        service_name: mlflow-server 
         # image: gcr.io/deployml-2025/wandb/wandb:latest
         # service_name: wandb-server 
@@ -19,24 +19,30 @@ stack:
   - artifact_tracking:
       name: mlflow
       params: 
-        image: gcr.io/deployml-2025/mlflow/mlflow:latest
+        image: gcr.io/mlops-intro-461805/mlflow/mlflow:latest
         # image: gcr.io/deployml-2025/wandb/wandb:latest
         # artifact_bucket: mlflow-artifact-bucket-deployml-2025-v1678
   - model_registry:
       name: mlflow
       # name: wandb
       params: 
-        image: gcr.io/deployml-2025/mlflow/mlflow:latest
-        backend_store_uri: sqlite
+        image: gcr.io/mlops-intro-461805/mlflow/mlflow:latest
+        backend_store_uri: postgresql
         # backend_store_uri: sqlite
         # backend_store_uri: postgresql
-  # - model_serving:
-  #     name: fastapi
-  #     params:
-  #       image: gcr.io/deployml-2025/fastapi/fastapi:latest
-  #       service_name: fastapi-mlflow-server-postgres
-  - model_monitoring:
-      name: grafana
-      params: 
-        image: gcr.io/deployml-2025/grafana/grafana:latest
-        service_name: grafana-server
+  - feature_store:
+      name: feast
+      params:
+        image: gcr.io/mlops-intro-461805/feast/feast:latest
+        service_name: feast-server
+        backend_store_uri: postgresql
+  - model_serving:
+      name: fastapi
+      params:
+        image: gcr.io/mlops-intro-461805/fastapi/fastapi:latest
+        service_name: fastapi-mlflow-server-postgres
+  # - model_monitoring:
+  #     name: grafana
+  #     params: 
+  #       image: gcr.io/mlops-intro-461805/grafana/grafana:latest
+  #       service_name: grafana-server

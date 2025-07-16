@@ -197,3 +197,16 @@ variable "model_uri" {
   default     = ""
 }
 
+# Feast-specific variables
+variable "feast_bigquery_dataset" {
+  description = "BigQuery dataset for Feast offline store"
+  type        = string
+  default     = "feast_offline_store"
+}
+
+variable "feast_create_bigquery_dataset" {
+  description = "Whether to create BigQuery dataset for Feast"
+  type        = bool
+  default     = true
+}
+
