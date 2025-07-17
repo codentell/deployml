@@ -93,6 +93,12 @@ variable "mlflow_port" {
   default = 5000
 }
 
+variable "fastapi_port" {
+  type = number
+  description = "Port for FastAPI proxy server"
+  default = 8000
+}
+
 variable "enable_https" {
   type = bool
   description = "Whether to enable HTTPS for MLflow"
@@ -151,6 +157,12 @@ variable "startup_script" {
   type = string
   description = "Custom startup script (optional, overrides default)"
   default = ""
+}
+
+variable "fastapi_app_source" {
+  type = string
+  description = "Source location for FastAPI application main.py (GCS path, local file, or 'template' for default)"
+  default = "template"
 }
 
 variable "api_dependency" {

@@ -12,22 +12,30 @@ cost_analysis:
 
 deployment:
   type: cloud_vm
+
 stack:
   - experiment_tracking:
       name: mlflow
       params:
-        service_name: mlflow-server-vm
-        vm_name: mlflow-vm-instance
+        # service_name: mlflow-server-vm
+        service_name: mlflow-server-postgres-vm # for postgres backend
+        # vm_name: mlflow-vm-instance
+        vm_name: mlflow-postgres-vm-instance # for postgres backend
         machine_type: e2-medium
         disk_size_gb: 20
         mlflow_port: 5000
         allow_public_access: true
+        # FastAPI configuration
+        fastapi_port: 8000
+        fastapi_app_source: "template"  # or "gs://bucket/path.py" or "/local/path.py"
   - artifact_tracking:
       name: mlflow
       params: 
-        artifact_bucket: mlflow-artifact-bucket-vm-12345
+        # artifact_bucket: mlflow-artifact-bucket-vm-54321
+        artifact_bucket: mlflow-artifact-bucket-postgres-12345 # for postgres backend
         create_bucket: true
   - model_registry:
       name: mlflow
       params: 
-        backend_store_uri: sqlite:///mlflow.db 
+        # backend_store_uri: sqlite:///mlflow.db  # SQLite backend (local file)
+        backend_store_uri: postgresql # for postgres backend

@@ -168,16 +168,44 @@ variable "{{ stage_name }}_{{ tool.name }}_image" {
 # Control variables for module behavior
 {% for stage in stack %}
   {% for stage_name, tool in stage.items() %}
-variable "enable_{{ stage_name }}_{{ tool.name }}" {
-  description = "Enable/disable {{ stage_name }}_{{ tool.name }} module"
-  type        = bool
-  default     = true
+    {% if stage_name in ["experiment_tracking", "model_serving"] and 'service_name' in tool.params %}
+variable "{{ stage_name }}_{{ tool.name }}_service_name" {
+  description = "Service name for {{ stage_name }}_{{ tool.name }}"
+  type        = string
+  default     = ""
 }
+    {% endif %}
+    variable "enable_{{ stage_name }}_{{ tool.name }}" {
+      description = "Enable/disable {{ stage_name }}_{{ tool.name }} module"
+      type        = bool
+      default     = true
+    }
   {% endfor %}
 {% endfor %}
 
 variable "create_artifact_bucket" {
   description = "Whether to create the artifact bucket (true) or use an existing one (false)"
+  type        = bool
+  default     = true
+}
+
+
+
+variable "model_uri" {
+  description = "Model URI for FastAPI"
+  type        = string
+  default     = ""
+}
+
+# Feast-specific variables
+variable "feast_bigquery_dataset" {
+  description = "BigQuery dataset for Feast offline store"
+  type        = string
+  default     = "feast_offline_store"
+}
+
+variable "feast_create_bigquery_dataset" {
+  description = "Whether to create BigQuery dataset for Feast"
   type        = bool
   default     = true
 }

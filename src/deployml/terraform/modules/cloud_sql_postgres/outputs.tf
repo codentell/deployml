@@ -38,3 +38,11 @@ output "postgresql_credentials" {
     connection_string        = "postgresql+psycopg2://${var.db_user}:${random_password.db_password.result}@${google_sql_database_instance.postgres.public_ip_address}:5432/${var.db_name}"
   }
 }
+
+output "feast_connection_string" {
+  value = "postgresql+psycopg2://${var.db_user}:${random_password.db_password.result}@${google_sql_database_instance.postgres.public_ip_address}:5432/feast"
+}
+
+output "feast_connection_string_cloud_sql" {
+  value = "postgresql+psycopg2://${var.db_user}:${random_password.db_password.result}@/feast?host=/cloudsql/${google_sql_database_instance.postgres.connection_name}"
+}

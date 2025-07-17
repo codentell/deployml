@@ -11,7 +11,7 @@ enable_{{ stage_name }}_{{ tool.name }} = true
 
 # Dynamic parameter assignment from YAML config
 {%- set defined = [
-  "project_id", "region", "zone", "create_service", "create_bucket", "service_name", "vm_name", "machine_type", "disk_size_gb", "disk_type", "image_family", "artifact_bucket", "backend_store_uri", "image", "allow_public_access", "mlflow_port", "enable_https", "service_account_email", "network", "subnetwork", "allow_http_https", "use_postgres", "cloudsql_instance_annotation", "tags", "metadata", "startup_script"
+  "project_id", "region", "zone", "create_service", "create_bucket", "service_name", "vm_name", "machine_type", "disk_size_gb", "disk_type", "image_family", "artifact_bucket", "backend_store_uri", "image", "allow_public_access", "mlflow_port", "fastapi_port", "fastapi_app_source", "enable_https", "service_account_email", "network", "subnetwork", "allow_http_https", "use_postgres", "cloudsql_instance_annotation", "tags", "metadata", "startup_script"
 ] -%}
 {%- set seen = [] -%}
 {% for stage in stack %}
@@ -21,7 +21,7 @@ enable_{{ stage_name }}_{{ tool.name }} = true
         {%- set _ = seen.append(key) -%}
         {% if key in ["create_service", "create_bucket", "allow_public_access", "allow_http_https", "enable_https", "use_postgres"] %}
 {{ key }} = {{ "true" if value else "false" }}
-        {% elif key in ["disk_size_gb", "mlflow_port"] %}
+        {% elif key in ["disk_size_gb", "mlflow_port", "fastapi_port"] %}
 {{ key }} = {{ value }}
         {% elif key == "tags" %}
 {{ key }} = {{ value }}
@@ -74,6 +74,12 @@ allow_public_access = true
 {% endif %}
 {% if "mlflow_port" not in seen %}
 mlflow_port = 5000
+{% endif %}
+{% if "fastapi_port" not in seen %}
+fastapi_port = 8000
+{% endif %}
+{% if "fastapi_app_source" not in seen %}
+fastapi_app_source = "template"
 {% endif %}
 {% if "enable_https" not in seen %}
 enable_https = false
