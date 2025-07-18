@@ -6,6 +6,11 @@ resource "google_cloud_run_service" "fastapi" {
   project  = var.project_id
 
   template {
+    metadata {
+      annotations = var.use_postgres && var.cloudsql_instance_annotation != "" ? {
+        "run.googleapis.com/cloudsql-instances" = var.cloudsql_instance_annotation
+      } : {}
+    }
     spec {
       service_account_name = "${data.google_project.current.number}-compute@developer.gserviceaccount.com"
       containers {
@@ -17,6 +22,14 @@ resource "google_cloud_run_service" "fastapi" {
         env {
           name  = "MODEL_URI"
           value = var.model_uri
+        }
+        env {
+          name  = "BACKEND_STORE_URI"
+          value = var.backend_store_uri
+        }
+        env {
+          name  = "USE_POSTGRES"
+          value = var.use_postgres ? "true" : "false"
         }
         resources {
           limits = {

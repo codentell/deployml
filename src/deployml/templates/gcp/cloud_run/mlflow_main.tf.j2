@@ -116,6 +116,15 @@ module "{{ stage_name }}_{{ tool.name }}" {
   cpu_limit           = var.cpu_limit
   memory_limit        = var.memory_limit
   allow_public_access = var.allow_public_access
+  {% if flags.needs_postgres %}
+  backend_store_uri   = module.cloud_sql_postgres.connection_string
+  use_postgres        = true
+  cloudsql_instance_annotation = module.cloud_sql_postgres.instance_connection_name
+  {% else %}
+  backend_store_uri   = "{{ tool.params.get('backend_store_uri', 'sqlite:///mlflow.db') }}"
+  use_postgres        = false
+  cloudsql_instance_annotation = ""
+  {% endif %}
 }
     {% endif %}
   {% endfor %}
