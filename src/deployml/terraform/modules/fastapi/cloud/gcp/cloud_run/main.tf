@@ -31,6 +31,14 @@ resource "google_cloud_run_service" "fastapi" {
           name  = "USE_POSTGRES"
           value = var.use_postgres ? "true" : "false"
         }
+        env {
+          name  = "FEAST_SERVICE_URL"
+          value = var.feast_service_url
+        }
+        env {
+          name  = "ENABLE_FEAST_CONNECTION"
+          value = var.enable_feast_connection ? "true" : "false"
+        }
         resources {
           limits = {
             cpu    = var.cpu_limit

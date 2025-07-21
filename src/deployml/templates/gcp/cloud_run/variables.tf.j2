@@ -168,7 +168,7 @@ variable "{{ stage_name }}_{{ tool.name }}_image" {
 # Control variables for module behavior
 {% for stage in stack %}
   {% for stage_name, tool in stage.items() %}
-    {% if stage_name in ["experiment_tracking", "model_serving"] and 'service_name' in tool.params %}
+    {% if stage_name in ["experiment_tracking", "model_serving", "feature_store"] and 'service_name' in tool.params %}
 variable "{{ stage_name }}_{{ tool.name }}_service_name" {
   description = "Service name for {{ stage_name }}_{{ tool.name }}"
   type        = string

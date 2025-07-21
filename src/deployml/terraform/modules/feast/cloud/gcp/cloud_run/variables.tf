@@ -20,12 +20,13 @@ variable "image" {
 
 variable "backend_store_uri" {
   type        = string
-  description = "PostgreSQL connection string for Feast registry"
+  description = "Backend store URI for Feast registry (PostgreSQL or SQLite)"
 }
 
 variable "postgres_host" {
   type        = string
   description = "PostgreSQL host for online store"
+  default     = ""
 }
 
 variable "postgres_port" {
@@ -37,17 +38,20 @@ variable "postgres_port" {
 variable "postgres_database" {
   type        = string
   description = "PostgreSQL database name for online store"
+  default     = ""
 }
 
 variable "postgres_user" {
   type        = string
   description = "PostgreSQL username for online store"
+  default     = ""
 }
 
 variable "postgres_password" {
   type        = string
   description = "PostgreSQL password for online store"
   sensitive   = true
+  default     = ""
 }
 
 variable "bigquery_dataset" {
@@ -124,5 +128,5 @@ variable "create_service" {
 variable "use_postgres" {
   type        = bool
   description = "Whether to use PostgreSQL backend"
-  default     = true
+  default     = false
 }
