@@ -167,6 +167,42 @@ resource "google_service_account" "vm_service_account" {
   depends_on = [null_resource.api_readiness_check]
 }
 
+# Project-level IAM bindings for the service account (these will show up in the IAM UI)
+{% for stage in stack %}
+  {% for stage_name, tool in stage.items() %}
+    {% if tool.name == "mlflow" and tool.params.get("artifact_bucket") %}
+resource "google_project_iam_member" "vm_service_account_storage_admin" {
+  project    = var.project_id
+  role       = "roles/storage.objectAdmin"
+  member     = "serviceAccount:${google_service_account.vm_service_account.email}"
+  depends_on = [google_service_account.vm_service_account, null_resource.api_readiness_check]
+}
+
+resource "google_project_iam_member" "vm_service_account_storage_viewer" {
+  project    = var.project_id
+  role       = "roles/storage.objectViewer"
+  member     = "serviceAccount:${google_service_account.vm_service_account.email}"
+  depends_on = [google_service_account.vm_service_account, null_resource.api_readiness_check]
+}
+    {% endif %}
+  {% endfor %}
+{% endfor %}
+
+# Additional useful permissions for the VM service account
+resource "google_project_iam_member" "vm_service_account_logging" {
+  project    = var.project_id
+  role       = "roles/logging.logWriter"
+  member     = "serviceAccount:${google_service_account.vm_service_account.email}"
+  depends_on = [google_service_account.vm_service_account, null_resource.api_readiness_check]
+}
+
+resource "google_project_iam_member" "vm_service_account_monitoring" {
+  project    = var.project_id
+  role       = "roles/monitoring.metricWriter"
+  member     = "serviceAccount:${google_service_account.vm_service_account.email}"
+  depends_on = [google_service_account.vm_service_account, null_resource.api_readiness_check]
+}
+
 # Define a Google Compute Engine instance
 resource "google_compute_instance" "mlflow_vm" {
   name         = "{{ flags.mlflow_params.vm_name }}"
@@ -898,6 +934,28 @@ output "bucket_name" {
 # Zone output
 output "deployment_zone" {
   value = "{{ zone }}"
+}
+
+# Debug outputs for IAM troubleshooting
+output "service_account_email" {
+  description = "Email of the created service account"
+  value       = google_service_account.vm_service_account.email
+}
+
+output "iam_debug_info" {
+  description = "Debug information for IAM configuration"
+  value = {
+    service_account_id = google_service_account.vm_service_account.account_id
+    project_id         = var.project_id
+    {% for stage in stack %}
+      {% for stage_name, tool in stage.items() %}
+        {% if tool.name == "mlflow" and tool.params.get("artifact_bucket") %}
+    artifact_bucket    = "{{ tool.params.artifact_bucket }}"
+    iam_bindings_created = "yes - storage permissions applied"
+        {% endif %}
+      {% endfor %}
+    {% endfor %}
+  }
 }
 
 

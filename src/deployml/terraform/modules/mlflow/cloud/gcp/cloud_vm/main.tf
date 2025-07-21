@@ -1,9 +1,41 @@
+# Enable required Google Cloud APIs first
+resource "google_project_service" "required_apis" {
+  for_each = toset([
+    "compute.googleapis.com",                   # Compute Engine (VMs, disks, networks)
+    "storage.googleapis.com",                   # Cloud Storage (artifact buckets)
+    "iam.googleapis.com",                       # Identity and Access Management
+    "iamcredentials.googleapis.com",            # IAM Service Account Credentials
+    "logging.googleapis.com",                   # Cloud Logging
+    "monitoring.googleapis.com",                # Cloud Monitoring
+    "serviceusage.googleapis.com",              # Service Usage (for enabling APIs)
+    "cloudresourcemanager.googleapis.com",     # Cloud Resource Manager (project operations)
+  ])
+
+  project = var.project_id
+  service = each.value
+
+  # Keep APIs enabled when destroying resources
+  disable_on_destroy = false
+}
+
+# Wait for API propagation (critical for fresh projects)
+resource "time_sleep" "wait_for_api_propagation" {
+  depends_on = [
+    google_project_service.required_apis
+  ]
+
+  create_duration = "120s"  # 2 minutes for API propagation
+}
+
 # Storage bucket - only create if explicitly requested
 resource "google_storage_bucket" "artifact" {
   count         = var.create_bucket && var.artifact_bucket != "" ? 1 : 0
   name          = var.artifact_bucket
   location      = var.region
   force_destroy = true
+  
+  # Explicit dependency to ensure APIs are ready FIRST
+  depends_on = [time_sleep.wait_for_api_propagation]
   
   labels = {
     component = "mlflow-artifacts"
@@ -16,6 +48,9 @@ resource "google_service_account" "vm_service_account" {
   account_id   = "mlflow-vm-sa"
   display_name = "Service Account for MLflow VM"
   project      = var.project_id
+  
+  # Explicit dependency to ensure APIs are ready FIRST
+  depends_on = [time_sleep.wait_for_api_propagation]
 }
 
 # Define a Google Compute Engine instance
@@ -24,6 +59,9 @@ resource "google_compute_instance" "mlflow_vm" {
   name         = var.vm_name
   machine_type = var.machine_type
   zone         = var.zone
+  
+  # Explicit dependency to ensure APIs are ready FIRST
+  depends_on = [time_sleep.wait_for_api_propagation]
 
   boot_disk {
     initialize_params {
@@ -624,6 +662,9 @@ resource "google_compute_firewall" "allow_mlflow" {
   network     = var.network
   project     = var.project_id
   description = "Allow MLflow traffic to VM"
+  
+  # Explicit dependency to ensure APIs are ready FIRST
+  depends_on = [time_sleep.wait_for_api_propagation]
 
   allow {
     protocol = "tcp"
@@ -641,6 +682,9 @@ resource "google_compute_firewall" "allow_fastapi" {
   network     = var.network
   project     = var.project_id
   description = "Allow FastAPI traffic to VM"
+  
+  # Explicit dependency to ensure APIs are ready FIRST
+  depends_on = [time_sleep.wait_for_api_propagation]
 
   allow {
     protocol = "tcp"
@@ -658,6 +702,9 @@ resource "google_compute_firewall" "allow_http_https" {
   network     = var.network
   project     = var.project_id
   description = "Allow HTTP/HTTPS traffic to MLflow VM"
+  
+  # Explicit dependency to ensure APIs are ready FIRST
+  depends_on = [time_sleep.wait_for_api_propagation]
 
   allow {
     protocol = "tcp"
@@ -675,6 +722,9 @@ resource "google_compute_firewall" "allow_lb_health_checks" {
   network     = var.network
   project     = var.project_id
   description = "Allow traffic for Load Balancer Health Checks"
+  
+  # Explicit dependency to ensure APIs are ready FIRST
+  depends_on = [time_sleep.wait_for_api_propagation]
 
   allow {
     protocol = "tcp"
@@ -748,9 +798,89 @@ output "docker_commands" {
   }
 }
 
-resource "google_storage_bucket_iam_member" "mlflow_vm_artifact_access" {
-  count  = var.create_bucket && var.artifact_bucket != "" ? 1 : 0
-  bucket = google_storage_bucket.artifact[0].name
-  role   = "roles/storage.objectAdmin"
-  member = "serviceAccount:${google_service_account.vm_service_account.email}"
+# Debug outputs for IAM troubleshooting
+output "service_account_email" {
+  description = "Email of the created service account"
+  value       = google_service_account.vm_service_account.email
+}
+
+output "iam_debug_info" {
+  description = "Debug information for IAM configuration"
+  value = {
+    create_bucket      = var.create_bucket
+    artifact_bucket    = var.artifact_bucket
+    bucket_iam_count   = var.create_bucket && var.artifact_bucket != "" ? 1 : 0
+    existing_iam_count = !var.create_bucket && var.artifact_bucket != "" ? 1 : 0
+    project_iam_count  = var.artifact_bucket != "" ? 1 : 0
+    service_account_id = google_service_account.vm_service_account.account_id
+    project_id         = var.project_id
+  }
+}
+
+# IAM bindings for when bucket is created by this module
+resource "google_storage_bucket_iam_member" "mlflow_vm_artifact_access_admin" {
+  count      = var.create_bucket && var.artifact_bucket != "" ? 1 : 0
+  bucket     = google_storage_bucket.artifact[0].name
+  role       = "roles/storage.objectAdmin"
+  member     = "serviceAccount:${google_service_account.vm_service_account.email}"
+  depends_on = [google_storage_bucket.artifact, google_service_account.vm_service_account]
+}
+
+resource "google_storage_bucket_iam_member" "mlflow_vm_artifact_access_viewer" {
+  count      = var.create_bucket && var.artifact_bucket != "" ? 1 : 0
+  bucket     = google_storage_bucket.artifact[0].name
+  role       = "roles/storage.objectViewer"
+  member     = "serviceAccount:${google_service_account.vm_service_account.email}"
+  depends_on = [google_storage_bucket.artifact, google_service_account.vm_service_account]
+}
+
+# IAM bindings for when using existing bucket (not created by this module)
+resource "google_storage_bucket_iam_member" "mlflow_vm_existing_bucket_access_admin" {
+  count      = !var.create_bucket && var.artifact_bucket != "" ? 1 : 0
+  bucket     = var.artifact_bucket
+  role       = "roles/storage.objectAdmin"
+  member     = "serviceAccount:${google_service_account.vm_service_account.email}"
+  depends_on = [google_service_account.vm_service_account]
+}
+
+resource "google_storage_bucket_iam_member" "mlflow_vm_existing_bucket_access_viewer" {
+  count      = !var.create_bucket && var.artifact_bucket != "" ? 1 : 0
+  bucket     = var.artifact_bucket
+  role       = "roles/storage.objectViewer"
+  member     = "serviceAccount:${google_service_account.vm_service_account.email}"
+  depends_on = [google_service_account.vm_service_account]
+}
+
+# Project-level IAM bindings (these will show up in the main IAM UI)
+resource "google_project_iam_member" "vm_service_account_storage_admin" {
+  count      = var.artifact_bucket != "" ? 1 : 0
+  project    = var.project_id
+  role       = "roles/storage.objectAdmin"
+  member     = "serviceAccount:${google_service_account.vm_service_account.email}"
+  depends_on = [google_service_account.vm_service_account, time_sleep.wait_for_api_propagation]
+}
+
+resource "google_project_iam_member" "vm_service_account_storage_viewer" {
+  count      = var.artifact_bucket != "" ? 1 : 0
+  project    = var.project_id
+  role       = "roles/storage.objectViewer"
+  member     = "serviceAccount:${google_service_account.vm_service_account.email}"
+  depends_on = [google_service_account.vm_service_account, time_sleep.wait_for_api_propagation]
+}
+
+# Additional useful permissions for the VM service account
+resource "google_project_iam_member" "vm_service_account_logging" {
+  count      = var.create_service ? 1 : 0
+  project    = var.project_id
+  role       = "roles/logging.logWriter"
+  member     = "serviceAccount:${google_service_account.vm_service_account.email}"
+  depends_on = [google_service_account.vm_service_account, time_sleep.wait_for_api_propagation]
+}
+
+resource "google_project_iam_member" "vm_service_account_monitoring" {
+  count      = var.create_service ? 1 : 0
+  project    = var.project_id
+  role       = "roles/monitoring.metricWriter"
+  member     = "serviceAccount:${google_service_account.vm_service_account.email}"
+  depends_on = [google_service_account.vm_service_account, time_sleep.wait_for_api_propagation]
 }
