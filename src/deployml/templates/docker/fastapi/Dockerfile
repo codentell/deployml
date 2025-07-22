@@ -15,7 +15,12 @@ RUN pip install --upgrade pip setuptools wheel
 RUN pip install \
     fastapi \
     uvicorn \
-    httpx
+    httpx \
+    mlflow \
+    pandas \
+    joblib \
+    scikit-learn \
+    numpy
 
 # Create fastapi user
 RUN useradd -m -s /bin/bash fastapi
