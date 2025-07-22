@@ -40,7 +40,7 @@ stack:
       name: fastapi
       params:
         image: gcr.io/mlops-intro-461805/fastapi/fastapi:latest
-        service_name: fastapi-mlflow-server-postgres
+        service_name: fastapi-mlflow-server
   # - model_monitoring:
   #     name: grafana
   #     params: 

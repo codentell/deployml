@@ -51,4 +51,34 @@ variable "mlflow_artifact_bucket" {
   type        = string
   description = "MLflow artifact bucket name"
   default     = ""
+}
+
+variable "backend_store_uri" {
+  type        = string
+  description = "Backend store URI for MLflow (sqlite or postgresql)"
+  default     = "sqlite:///mlflow.db"
+}
+
+variable "use_postgres" {
+  type        = bool
+  description = "Whether to use PostgreSQL backend"
+  default     = false
+}
+
+variable "cloudsql_instance_annotation" {
+  type        = string
+  description = "Cloud SQL instance connection name for annotation"
+  default     = ""
+}
+
+variable "feast_service_url" {
+  type        = string
+  description = "Feast service URL for feature serving"
+  default     = ""
+}
+
+variable "enable_feast_connection" {
+  type        = bool
+  description = "Whether to enable Feast connection"
+  default     = false
 } 

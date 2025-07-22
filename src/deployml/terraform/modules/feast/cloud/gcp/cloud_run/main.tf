@@ -7,9 +7,14 @@ resource "google_cloud_run_service" "feast" {
 
   template {
     metadata {
-      annotations = {
+      annotations = var.use_postgres && var.cloudsql_instance_annotation != "" ? {
         "autoscaling.knative.dev/maxScale" = var.max_scale
         "run.googleapis.com/cloudsql-instances" = var.cloudsql_instance_annotation
+        "run.googleapis.com/execution-environment" = "gen2"
+        "run.googleapis.com/memory" = var.memory_limit
+        "run.googleapis.com/cpu" = var.cpu_limit
+      } : {
+        "autoscaling.knative.dev/maxScale" = var.max_scale
         "run.googleapis.com/execution-environment" = "gen2"
         "run.googleapis.com/memory" = var.memory_limit
         "run.googleapis.com/cpu" = var.cpu_limit
@@ -23,7 +28,7 @@ resource "google_cloud_run_service" "feast" {
         
         env {
           name  = "FEAST_REGISTRY_TYPE"
-          value = "sql"
+          value = var.use_postgres ? "sql" : "file"
         }
         
         env {
@@ -33,7 +38,7 @@ resource "google_cloud_run_service" "feast" {
         
         env {
           name  = "FEAST_ONLINE_STORE_TYPE"
-          value = "postgres"
+          value = var.use_postgres ? "postgres" : "sqlite"
         }
         
         env {
@@ -59,6 +64,11 @@ resource "google_cloud_run_service" "feast" {
         env {
           name  = "FEAST_ONLINE_STORE_PASSWORD"
           value = var.postgres_password
+        }
+        
+        env {
+          name  = "USE_POSTGRES"
+          value = var.use_postgres ? "true" : "false"
         }
         
         env {
@@ -93,16 +103,16 @@ resource "google_cloud_run_service" "feast" {
         }
         
         ports {
-          container_port = 6566
+          container_port = 8080
         }
         
         startup_probe {
           http_get {
             path = "/health"
-            port = 6566
+            port = 8080
           }
           initial_delay_seconds = 60
-          timeout_seconds = 30
+          timeout_seconds = 5
           period_seconds = 10
           failure_threshold = 3
         }
@@ -110,10 +120,10 @@ resource "google_cloud_run_service" "feast" {
         liveness_probe {
           http_get {
             path = "/health"
-            port = 6566
+            port = 8080
           }
           initial_delay_seconds = 120
-          timeout_seconds = 30
+          timeout_seconds = 25
           period_seconds = 30
           failure_threshold = 3
         }
@@ -143,7 +153,6 @@ resource "google_cloud_run_service_iam_member" "public" {
 resource "google_project_service" "feast_apis" {
   for_each = toset([
     "run.googleapis.com",
-    "cloudsql.googleapis.com",
     "bigquery.googleapis.com",
     "storage.googleapis.com"
   ])
@@ -202,5 +211,9 @@ resource "google_bigquery_dataset" "feast_dataset" {
   labels = {
     component  = "feast-offline-store"
     managed-by = "terraform"
+  }
+  
+  lifecycle {
+    ignore_changes = [dataset_id]
   }
 }

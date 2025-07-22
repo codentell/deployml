@@ -6,6 +6,9 @@
     {% if tool.name == "mlflow" and tool.params.get("backend_store_uri", "") == "postgresql" %}
       {% set flags.needs_postgres = true %}
     {% endif %}
+    {% if tool.name == "feast" and tool.params.get("backend_store_uri", "") == "postgresql" %}
+      {% set flags.needs_postgres = true %}
+    {% endif %}
   {% endfor %}
 {% endfor %}
 
@@ -32,7 +35,7 @@ resource "google_storage_bucket" "{{ stage_name }}_mlflow_artifact" {
 {% endblock %}
 
 {% block postgres %}
-# Detect if any stage needs PostgreSQL for mlflow
+# Detect if any stage needs PostgreSQL for mlflow or feast
 {% if flags.needs_postgres %}
 module "cloud_sql_postgres" {
   source = "./modules/cloud_sql_postgres"
@@ -41,6 +44,17 @@ module "cloud_sql_postgres" {
   db_instance_name = "mlflow-postgres-{{ project_id }}"
   db_name         = "mlflow"
   db_user         = "mlflow"
+}
+
+# Create separate feast database in the same PostgreSQL instance
+resource "google_sql_database" "feast_db" {
+  name     = "feast"
+  instance = module.cloud_sql_postgres.instance_name
+  depends_on = [module.cloud_sql_postgres]
+  
+  lifecycle {
+    ignore_changes = [name]
+  }
 }
 {% endif %}
 {% endblock %}
@@ -80,7 +94,7 @@ module "{{ stage_name }}_mlflow" {
       image = var.{{ stage_name }}_mlflow_image != "" ? var.{{ stage_name }}_mlflow_image : var.global_image
     {% elif key == "artifact_bucket" %}
       # Skip - already handled above
-    {% elif key == "service_name" and stage_name in ["experiment_tracking", "model_serving"] %}
+    {% elif key == "service_name" and stage_name in ["experiment_tracking", "model_serving", "feature_store"] %}
       # Skip - handled separately below
     {% elif key not in resource_params and key != "create_artifact_bucket" and key != "backend_store_uri" and key != "use_postgres" %}
       {{ key }} = var.{{ key }}
@@ -100,6 +114,7 @@ module "{{ stage_name }}_mlflow" {
     {% if stage_name == "model_serving" and tool.name == "fastapi" %}
 module "{{ stage_name }}_{{ tool.name }}" {
   source              = "./modules/{{ tool.name }}/cloud/gcp/cloud_run"
+  count               = var.enable_{{ stage_name }}_{{ tool.name }} && var.{{ stage_name }}_{{ tool.name }}_service_name != "" ? 1 : 0
   project_id          = var.project_id
   region              = var.region
   service_name        = var.{{ stage_name }}_{{ tool.name }}_service_name
@@ -116,6 +131,71 @@ module "{{ stage_name }}_{{ tool.name }}" {
   cpu_limit           = var.cpu_limit
   memory_limit        = var.memory_limit
   allow_public_access = var.allow_public_access
+  {% if flags.needs_postgres %}
+  backend_store_uri   = module.cloud_sql_postgres.connection_string
+  use_postgres        = true
+  cloudsql_instance_annotation = module.cloud_sql_postgres.instance_connection_name
+  {% else %}
+  backend_store_uri   = "{{ tool.params.get('backend_store_uri', 'sqlite:///mlflow.db') }}"
+  use_postgres        = false
+  cloudsql_instance_annotation = ""
+  {% endif %}
+  # Feast connection - check if feast exists in stack
+  {% set feast_exists = namespace(value=false) %}
+  {% for check_stage in stack %}
+    {% for check_stage_name, check_tool in check_stage.items() %}
+      {% if check_stage_name == "feature_store" and check_tool.name == "feast" %}
+        {% set feast_exists.value = true %}
+      {% endif %}
+    {% endfor %}
+  {% endfor %}
+  feast_service_url = {{ 'length(module.feature_store_feast) > 0 ? module.feature_store_feast[0].service_url : ""' if feast_exists.value else '""' }}
+  enable_feast_connection = {{ 'true' if feast_exists.value else 'false' }}
+  {% if feast_exists.value %}
+  depends_on = [module.feature_store_feast]
+  {% endif %}
+}
+    {% endif %}
+  {% endfor %}
+{% endfor %}
+
+# Optional: Feast feature store module, only if present in stack
+{% for stage in stack %}
+  {% for stage_name, tool in stage.items() %}
+    {% if stage_name == "feature_store" and tool.name == "feast" %}
+module "{{ stage_name }}_{{ tool.name }}" {
+  source              = "./modules/{{ tool.name }}/cloud/gcp/cloud_run"
+  count               = var.enable_{{ stage_name }}_{{ tool.name }} && var.{{ stage_name }}_{{ tool.name }}_service_name != "" ? 1 : 0
+  project_id          = var.project_id
+  region              = var.region
+  service_name        = var.{{ stage_name }}_{{ tool.name }}_service_name
+  image               = var.{{ stage_name }}_{{ tool.name }}_image
+  cpu_limit           = var.cpu_limit
+  memory_limit        = var.memory_limit
+  allow_public_access = var.allow_public_access
+  create_service      = true
+  bigquery_dataset    = var.feast_bigquery_dataset
+  create_bigquery_dataset = var.feast_create_bigquery_dataset
+  artifact_bucket     = {% if create_artifact_bucket %}google_storage_bucket.artifact_tracking_mlflow_artifact.name{% else %}var.artifact_bucket{% endif %}
+  {% if flags.needs_postgres %}
+  backend_store_uri   = module.cloud_sql_postgres.feast_connection_string_cloud_sql
+  use_postgres        = true
+  cloudsql_instance_annotation = module.cloud_sql_postgres.instance_connection_name
+  postgres_host       = module.cloud_sql_postgres.postgres_host
+  postgres_port       = module.cloud_sql_postgres.postgres_port
+  postgres_database   = module.cloud_sql_postgres.postgres_database
+  postgres_user       = module.cloud_sql_postgres.postgres_user
+  postgres_password   = module.cloud_sql_postgres.postgres_password
+  {% else %}
+  backend_store_uri   = "{{ tool.params.get('backend_store_uri', 'sqlite:///feast.db') }}"
+  use_postgres        = false
+  cloudsql_instance_annotation = ""
+  postgres_host       = ""
+  postgres_port       = ""
+  postgres_database   = ""
+  postgres_user       = ""
+  postgres_password   = ""
+  {% endif %}
 }
     {% endif %}
   {% endfor %}
@@ -161,7 +241,18 @@ output "postgresql_credentials" {
   {% for stage_name, tool in stage.items() %}
     {% if stage_name == "model_serving" and tool.name == "fastapi" %}
 output "{{ stage_name }}_{{ tool.name }}_url" {
-  value = length(module.{{ stage_name }}_{{ tool.name }}) > 0 ? module.{{ stage_name }}_{{ tool.name }}.service_url : ""
+  value = length(module.{{ stage_name }}_{{ tool.name }}) > 0 ? module.{{ stage_name }}_{{ tool.name }}[0].service_url : ""
+}
+    {% endif %}
+  {% endfor %}
+{% endfor %}
+
+# Output for Feast feature store if present
+{% for stage in stack %}
+  {% for stage_name, tool in stage.items() %}
+    {% if stage_name == "feature_store" and tool.name == "feast" %}
+output "{{ stage_name }}_{{ tool.name }}_url" {
+  value = length(module.{{ stage_name }}_{{ tool.name }}) > 0 ? module.{{ stage_name }}_{{ tool.name }}[0].service_url : ""
 }
     {% endif %}
   {% endfor %}
