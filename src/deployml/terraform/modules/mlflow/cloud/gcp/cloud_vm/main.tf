@@ -1,9 +1,41 @@
+# Enable required Google Cloud APIs first
+resource "google_project_service" "required_apis" {
+  for_each = toset([
+    "compute.googleapis.com",                   # Compute Engine (VMs, disks, networks)
+    "storage.googleapis.com",                   # Cloud Storage (artifact buckets)
+    "iam.googleapis.com",                       # Identity and Access Management
+    "iamcredentials.googleapis.com",            # IAM Service Account Credentials
+    "logging.googleapis.com",                   # Cloud Logging
+    "monitoring.googleapis.com",                # Cloud Monitoring
+    "serviceusage.googleapis.com",              # Service Usage (for enabling APIs)
+    "cloudresourcemanager.googleapis.com",     # Cloud Resource Manager (project operations)
+  ])
+
+  project = var.project_id
+  service = each.value
+
+  # Keep APIs enabled when destroying resources
+  disable_on_destroy = false
+}
+
+# Wait for API propagation (critical for fresh projects)
+resource "time_sleep" "wait_for_api_propagation" {
+  depends_on = [
+    google_project_service.required_apis
+  ]
+
+  create_duration = "120s"  # 2 minutes for API propagation
+}
+
 # Storage bucket - only create if explicitly requested
 resource "google_storage_bucket" "artifact" {
   count         = var.create_bucket && var.artifact_bucket != "" ? 1 : 0
   name          = var.artifact_bucket
   location      = var.region
   force_destroy = true
+  
+  # Explicit dependency to ensure APIs are ready FIRST
+  depends_on = [time_sleep.wait_for_api_propagation]
   
   labels = {
     component = "mlflow-artifacts"
@@ -16,6 +48,9 @@ resource "google_service_account" "vm_service_account" {
   account_id   = "mlflow-vm-sa"
   display_name = "Service Account for MLflow VM"
   project      = var.project_id
+  
+  # Explicit dependency to ensure APIs are ready FIRST
+  depends_on = [time_sleep.wait_for_api_propagation]
 }
 
 # Define a Google Compute Engine instance
@@ -24,6 +59,9 @@ resource "google_compute_instance" "mlflow_vm" {
   name         = var.vm_name
   machine_type = var.machine_type
   zone         = var.zone
+  
+  # Explicit dependency to ensure APIs are ready FIRST
+  depends_on = [time_sleep.wait_for_api_propagation]
 
   boot_disk {
     initialize_params {
@@ -264,7 +302,12 @@ RUN pip install --upgrade pip setuptools wheel
 RUN pip install \
     fastapi \
     uvicorn \
-    httpx
+    httpx \
+    mlflow \
+    pandas \
+    joblib \
+    scikit-learn \
+    numpy
 
 # Create fastapi user
 RUN useradd -m -s /bin/bash fastapi
@@ -298,16 +341,21 @@ FASTAPI_DOCKERFILE_EOF
     
     if [ "$FASTAPI_SOURCE" = "template" ]; then
         echo "Using default containerized FastAPI template..."
-        # Create a containerized FastAPI application with MLflow proxy
+        # Create a containerized FastAPI application with MLflow proxy and model integration
         cat > /home/$CURRENT_USER/deployml/docker/fastapi/main.py << 'FASTAPI_TEMPLATE_EOF'
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, BackgroundTasks
 from fastapi.responses import RedirectResponse, HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 import httpx
 import os
 from contextlib import asynccontextmanager
 import logging
 import asyncio
+import mlflow
+import pandas as pd
+from datetime import datetime
+from typing import Optional
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -317,11 +365,114 @@ logger = logging.getLogger(__name__)
 MLFLOW_BASE_URL = os.getenv("MLFLOW_BASE_URL", "http://mlflow:5000")
 FASTAPI_PORT = int(os.getenv("FASTAPI_PORT", "8000"))
 
+# Global variables for model
+model = None
+feature_names = None
+model_info = {
+    "name": None,
+    "version": None,
+    "loaded_at": None,
+    "last_checked": None,
+    "status": "not_loaded"
+}
+
+# Configuration for model refresh
+MODEL_CHECK_INTERVAL = int(os.getenv("MODEL_CHECK_INTERVAL", "300"))  # 5 minutes default
+AUTO_REFRESH_ENABLED = os.getenv("AUTO_REFRESH_ENABLED", "true").lower() == "true"
+
+# Pydantic model for prediction request
+class PredictionRequest(BaseModel):
+    sepal_length: float
+    sepal_width: float
+    petal_length: float
+    petal_width: float
+
+async def load_mlflow_model() -> bool:
+    """Load or reload the MLflow model. Returns True if successful."""
+    global model, feature_names, model_info
+    
+    try:
+        logger.info("Loading/refreshing MLflow model...")
+        model_name = os.getenv("MODEL_NAME", "best_iris_model")
+        mlflow_tracking_uri = os.getenv("MLFLOW_TRACKING_URI", "sqlite:///mlflow.db")
+        experiment_name = os.getenv("EXPERIMENT_NAME", "iris_experiment")
+        
+        mlflow.set_tracking_uri(mlflow_tracking_uri)
+        mlflow.set_experiment(experiment_name)
+        
+        # Get model info first
+        client = mlflow.tracking.MlflowClient()
+        try:
+            latest_version = client.get_latest_versions(model_name, stages=["None", "Staging", "Production"])
+            if latest_version:
+                # Get the latest version (highest version number)
+                latest_model = max(latest_version, key=lambda x: int(x.version))
+                model_version = latest_model.version
+                
+                # Check if this is a new version
+                if model_info["version"] == model_version and model is not None:
+                    logger.info(f"Model version {model_version} already loaded, skipping refresh")
+                    model_info["last_checked"] = datetime.now().isoformat()
+                    return True
+                
+                logger.info(f"Loading model version: {model_version}")
+            else:
+                logger.warning("No model versions found, trying latest anyway")
+                model_version = "latest"
+        except Exception as e:
+            logger.warning(f"Could not get model version info: {e}, using 'latest'")
+            model_version = "latest"
+        
+        model_uri = f"models:/{model_name}/latest"
+        new_model = mlflow.pyfunc.load_model(model_uri)
+        
+        feature_names = [
+            "sepal length",
+            "sepal width", 
+            "petal length",
+            "petal width",
+        ]
+        
+        # Update model and info atomically
+        model = new_model
+        model_info.update({
+            "name": model_name,
+            "version": model_version,
+            "loaded_at": datetime.now().isoformat(),
+            "last_checked": datetime.now().isoformat(),
+            "status": "loaded"
+        })
+        
+        logger.info(f"✅ Successfully loaded model: {model_name} (version: {model_version})")
+        return True
+        
+    except Exception as e:
+        logger.error(f"❌ Failed to load MLflow model: {e}")
+        model_info.update({
+            "last_checked": datetime.now().isoformat(),
+            "status": "error",
+            "error": str(e)
+        })
+        return False
+
+async def check_for_model_updates():
+    """Background task to periodically check for model updates."""
+    while True:
+        try:
+            if AUTO_REFRESH_ENABLED and model_info["status"] == "loaded":
+                logger.info("Checking for model updates...")
+                await load_mlflow_model()
+            await asyncio.sleep(MODEL_CHECK_INTERVAL)
+        except Exception as e:
+            logger.error(f"Error in background model check: {e}")
+            await asyncio.sleep(MODEL_CHECK_INTERVAL)
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan events"""
     logger.info("FastAPI MLflow Proxy starting...")
     logger.info(f"Proxying requests to MLflow at: {MLFLOW_BASE_URL}")
+    logger.info(f"Auto-refresh enabled: {AUTO_REFRESH_ENABLED}, Check interval: {MODEL_CHECK_INTERVAL}s")
     
     # Wait for MLflow to be ready
     logger.info("Waiting for MLflow to be ready...")
@@ -339,13 +490,20 @@ async def lifespan(app: FastAPI):
                 logger.error(f"❌ MLflow not ready after {max_retries} attempts: {e}")
             await asyncio.sleep(2)
     
+    # Load MLflow model on startup
+    await load_mlflow_model()
+    
+    # Start background task for model checking
+    if AUTO_REFRESH_ENABLED:
+        asyncio.create_task(check_for_model_updates())
+    
     yield
     logger.info("FastAPI MLflow Proxy shutting down...")
 
 # Create FastAPI application
 app = FastAPI(
-    title="MLflow Proxy API",
-    description="Containerized FastAPI proxy for MLflow server",
+    title="MLflow Model API",
+    description="Containerized FastAPI server with MLflow model integration for predictions and MLflow proxy",
     version="1.0.0",
     lifespan=lifespan
 )
@@ -362,28 +520,84 @@ app.add_middleware(
 @app.get("/", response_class=HTMLResponse)
 async def root():
     """Root endpoint with links to available services"""
-    html_content = """
+    model_status = "✅ Ready" if model is not None else "❌ Not Loaded"
+    model_version = model_info.get("version", "Unknown")
+    loaded_at = model_info.get("loaded_at", "Never")
+    last_checked = model_info.get("last_checked", "Never")
+    
+    html_content = f"""
     <!DOCTYPE html>
     <html>
     <head>
-        <title>MLflow Proxy API</title>
+        <title>MLflow Model API</title>
         <style>
-            body { font-family: Arial, sans-serif; margin: 40px; }
-            h1 { color: #333; }
-            .links { margin: 20px 0; }
-            .link { display: block; padding: 10px; margin: 5px 0; background: #f0f0f0; text-decoration: none; border-radius: 5px; }
-            .link:hover { background: #e0e0e0; }
-            .container-info { background: #e7f3ff; padding: 15px; border-radius: 5px; margin: 20px 0; }
+            body {{ font-family: Arial, sans-serif; margin: 40px; }}
+            h1 {{ color: #333; }}
+            .links {{ margin: 20px 0; }}
+            .link {{ display: block; padding: 10px; margin: 5px 0; background: #f0f0f0; text-decoration: none; border-radius: 5px; }}
+            .link:hover {{ background: #e0e0e0; }}
+            .container-info {{ background: #e7f3ff; padding: 15px; border-radius: 5px; margin: 20px 0; }}
+            .model-status {{ background: #f0f8e7; padding: 15px; border-radius: 5px; margin: 20px 0; }}
+            .refresh-section {{ background: #fff3cd; padding: 15px; border-radius: 5px; margin: 20px 0; }}
+            .refresh-button {{ background: #28a745; color: white; padding: 8px 16px; border: none; border-radius: 4px; cursor: pointer; text-decoration: none; display: inline-block; }}
+            .refresh-button:hover {{ background: #218838; }}
+            .config-info {{ background: #e2e3e5; padding: 15px; border-radius: 5px; margin: 20px 0; font-size: 0.9em; }}
         </style>
+        <script>
+            async function refreshModel() {{
+                const button = document.getElementById('refresh-btn');
+                button.disabled = true;
+                button.textContent = 'Refreshing...';
+                
+                try {{
+                    const response = await fetch('/refresh-model', {{ method: 'POST' }});
+                    const result = await response.json();
+                    
+                    if (response.ok) {{
+                        alert('Model refreshed successfully!');
+                        location.reload();
+                    }} else {{
+                        alert('Failed to refresh model: ' + result.detail);
+                    }}
+                }} catch (error) {{
+                    alert('Error refreshing model: ' + error.message);
+                }} finally {{
+                    button.disabled = false;
+                    button.textContent = '🔄 Refresh Model';
+                }}
+            }}
+        </script>
     </head>
     <body>
-        <h1>🚀 MLflow Proxy API</h1>
+        <h1>🚀 MLflow Model API</h1>
         <div class="container-info">
             <h3>🐳 Containerized Deployment</h3>
-            <p>This FastAPI proxy is running in a Docker container and communicating with MLflow via Docker networking.</p>
-            <p><strong>MLflow URL:</strong> """ + MLFLOW_BASE_URL + """</p>
+            <p>This FastAPI server is running in a Docker container with MLflow model integration.</p>
+            <p><strong>MLflow URL:</strong> {MLFLOW_BASE_URL}</p>
+        </div>
+        <div class="model-status">
+            <h3>🤖 Model Status</h3>
+            <p><strong>Status:</strong> {model_status}</p>
+            <p><strong>Model:</strong> {model_info.get('name', 'None')}</p>
+            <p><strong>Version:</strong> {model_version}</p>
+            <p><strong>Loaded At:</strong> {loaded_at}</p>
+            <p><strong>Last Checked:</strong> {last_checked}</p>
+        </div>
+        <div class="refresh-section">
+            <h3>🔄 Model Management</h3>
+            <p>Click to manually refresh the model from MLflow:</p>
+            <button id="refresh-btn" class="refresh-button" onclick="refreshModel()">🔄 Refresh Model</button>
+        </div>
+        <div class="config-info">
+            <h3>⚙️ Configuration</h3>
+            <p><strong>Auto-refresh:</strong> {'Enabled' if AUTO_REFRESH_ENABLED else 'Disabled'}</p>
+            <p><strong>Check Interval:</strong> {MODEL_CHECK_INTERVAL} seconds</p>
+            <p><strong>MLflow URL:</strong> {MLFLOW_BASE_URL}</p>
+            <p><strong>Deployment:</strong> Containerized</p>
         </div>
         <div class="links">
+            <a class="link" href="/predict">🔮 Model Prediction (POST)</a>
+            <a class="link" href="/model-info">📋 Model Information</a>
             <a class="link" href="/mlflow">📊 MLflow UI</a>
             <a class="link" href="/health">🏥 Health Check</a>
             <a class="link" href="/docs">📚 API Documentation</a>
@@ -393,6 +607,76 @@ async def root():
     </html>
     """
     return HTMLResponse(content=html_content)
+
+@app.post("/predict")
+async def predict(data: PredictionRequest):
+    """Predict using the loaded MLflow model"""
+    if model is None:
+        raise HTTPException(
+            status_code=503, 
+            detail="Model not loaded. Please check MLflow configuration and ensure model exists."
+        )
+    
+    try:
+        # Convert request to DataFrame
+        input_data = pd.DataFrame([data.dict()])
+        input_data = input_data[
+            ["sepal_length", "sepal_width", "petal_length", "petal_width"]
+        ]
+        
+        # Rename columns to match training data
+        input_data.columns = feature_names
+        
+        # Make prediction
+        predictions = model.predict(input_data)
+        
+        return {
+            "predictions": predictions.tolist(),
+            "model_info": "MLflow loaded model",
+            "input_features": data.dict(),
+            "deployment": "containerized"
+        }
+        
+    except Exception as e:
+        logger.error(f"Prediction error: {e}")
+        raise HTTPException(
+            status_code=500, 
+            detail=f"Prediction failed: {str(e)}"
+        )
+
+@app.post("/refresh-model")
+async def refresh_model():
+    """Manually refresh the MLflow model"""
+    logger.info("Manual model refresh requested")
+    success = await load_mlflow_model()
+    
+    if success:
+        return {
+            "status": "success",
+            "message": "Model refreshed successfully",
+            "model_info": model_info
+        }
+    else:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to refresh model: {model_info.get('error', 'Unknown error')}"
+        )
+
+@app.get("/model-info")
+async def get_model_info():
+    """Get current model information"""
+    return {
+        "model_loaded": model is not None,
+        "model_info": model_info,
+        "config": {
+            "auto_refresh_enabled": AUTO_REFRESH_ENABLED,
+            "check_interval_seconds": MODEL_CHECK_INTERVAL,
+            "model_name": os.getenv("MODEL_NAME", "best_iris_model"),
+            "mlflow_tracking_uri": os.getenv("MLFLOW_TRACKING_URI", "sqlite:///mlflow.db"),
+            "experiment_name": os.getenv("EXPERIMENT_NAME", "iris_experiment")
+        },
+        "deployment": "containerized"
+    }
 
 @app.get("/health")
 async def health_check():
@@ -406,14 +690,16 @@ async def health_check():
                     "mlflow": "connected",
                     "mlflow_url": MLFLOW_BASE_URL,
                     "proxy_port": FASTAPI_PORT,
-                    "deployment": "containerized"
+                    "deployment": "containerized",
+                    "model_loaded": model is not None
                 }
             else:
                 return {
                     "status": "unhealthy",
                     "mlflow": "disconnected",
                     "mlflow_status_code": response.status_code,
-                    "deployment": "containerized"
+                    "deployment": "containerized",
+                    "model_loaded": model is not None
                 }
     except Exception as e:
         logger.error(f"Health check failed: {e}")
@@ -421,7 +707,8 @@ async def health_check():
             "status": "unhealthy",
             "error": str(e),
             "mlflow_url": MLFLOW_BASE_URL,
-            "deployment": "containerized"
+            "deployment": "containerized",
+            "model_loaded": model is not None
         }
 
 @app.get("/container-info")
@@ -435,7 +722,8 @@ async def container_info():
         "ports": {
             "fastapi": FASTAPI_PORT,
             "mlflow": 5000
-        }
+        },
+        "model_loaded": model is not None
     }
 
 @app.get("/mlflow")
@@ -624,6 +912,9 @@ resource "google_compute_firewall" "allow_mlflow" {
   network     = var.network
   project     = var.project_id
   description = "Allow MLflow traffic to VM"
+  
+  # Explicit dependency to ensure APIs are ready FIRST
+  depends_on = [time_sleep.wait_for_api_propagation]
 
   allow {
     protocol = "tcp"
@@ -641,6 +932,9 @@ resource "google_compute_firewall" "allow_fastapi" {
   network     = var.network
   project     = var.project_id
   description = "Allow FastAPI traffic to VM"
+  
+  # Explicit dependency to ensure APIs are ready FIRST
+  depends_on = [time_sleep.wait_for_api_propagation]
 
   allow {
     protocol = "tcp"
@@ -658,6 +952,9 @@ resource "google_compute_firewall" "allow_http_https" {
   network     = var.network
   project     = var.project_id
   description = "Allow HTTP/HTTPS traffic to MLflow VM"
+  
+  # Explicit dependency to ensure APIs are ready FIRST
+  depends_on = [time_sleep.wait_for_api_propagation]
 
   allow {
     protocol = "tcp"
@@ -675,6 +972,9 @@ resource "google_compute_firewall" "allow_lb_health_checks" {
   network     = var.network
   project     = var.project_id
   description = "Allow traffic for Load Balancer Health Checks"
+  
+  # Explicit dependency to ensure APIs are ready FIRST
+  depends_on = [time_sleep.wait_for_api_propagation]
 
   allow {
     protocol = "tcp"
@@ -748,9 +1048,89 @@ output "docker_commands" {
   }
 }
 
-resource "google_storage_bucket_iam_member" "mlflow_vm_artifact_access" {
-  count  = var.create_bucket && var.artifact_bucket != "" ? 1 : 0
-  bucket = google_storage_bucket.artifact[0].name
-  role   = "roles/storage.objectAdmin"
-  member = "serviceAccount:${google_service_account.vm_service_account.email}"
+# Debug outputs for IAM troubleshooting
+output "service_account_email" {
+  description = "Email of the created service account"
+  value       = google_service_account.vm_service_account.email
+}
+
+output "iam_debug_info" {
+  description = "Debug information for IAM configuration"
+  value = {
+    create_bucket      = var.create_bucket
+    artifact_bucket    = var.artifact_bucket
+    bucket_iam_count   = var.create_bucket && var.artifact_bucket != "" ? 1 : 0
+    existing_iam_count = !var.create_bucket && var.artifact_bucket != "" ? 1 : 0
+    project_iam_count  = var.artifact_bucket != "" ? 1 : 0
+    service_account_id = google_service_account.vm_service_account.account_id
+    project_id         = var.project_id
+  }
+}
+
+# IAM bindings for when bucket is created by this module
+resource "google_storage_bucket_iam_member" "mlflow_vm_artifact_access_admin" {
+  count      = var.create_bucket && var.artifact_bucket != "" ? 1 : 0
+  bucket     = google_storage_bucket.artifact[0].name
+  role       = "roles/storage.objectAdmin"
+  member     = "serviceAccount:${google_service_account.vm_service_account.email}"
+  depends_on = [google_storage_bucket.artifact, google_service_account.vm_service_account]
+}
+
+resource "google_storage_bucket_iam_member" "mlflow_vm_artifact_access_viewer" {
+  count      = var.create_bucket && var.artifact_bucket != "" ? 1 : 0
+  bucket     = google_storage_bucket.artifact[0].name
+  role       = "roles/storage.objectViewer"
+  member     = "serviceAccount:${google_service_account.vm_service_account.email}"
+  depends_on = [google_storage_bucket.artifact, google_service_account.vm_service_account]
+}
+
+# IAM bindings for when using existing bucket (not created by this module)
+resource "google_storage_bucket_iam_member" "mlflow_vm_existing_bucket_access_admin" {
+  count      = !var.create_bucket && var.artifact_bucket != "" ? 1 : 0
+  bucket     = var.artifact_bucket
+  role       = "roles/storage.objectAdmin"
+  member     = "serviceAccount:${google_service_account.vm_service_account.email}"
+  depends_on = [google_service_account.vm_service_account]
+}
+
+resource "google_storage_bucket_iam_member" "mlflow_vm_existing_bucket_access_viewer" {
+  count      = !var.create_bucket && var.artifact_bucket != "" ? 1 : 0
+  bucket     = var.artifact_bucket
+  role       = "roles/storage.objectViewer"
+  member     = "serviceAccount:${google_service_account.vm_service_account.email}"
+  depends_on = [google_service_account.vm_service_account]
+}
+
+# Project-level IAM bindings (these will show up in the main IAM UI)
+resource "google_project_iam_member" "vm_service_account_storage_admin" {
+  count      = var.artifact_bucket != "" ? 1 : 0
+  project    = var.project_id
+  role       = "roles/storage.objectAdmin"
+  member     = "serviceAccount:${google_service_account.vm_service_account.email}"
+  depends_on = [google_service_account.vm_service_account, time_sleep.wait_for_api_propagation]
+}
+
+resource "google_project_iam_member" "vm_service_account_storage_viewer" {
+  count      = var.artifact_bucket != "" ? 1 : 0
+  project    = var.project_id
+  role       = "roles/storage.objectViewer"
+  member     = "serviceAccount:${google_service_account.vm_service_account.email}"
+  depends_on = [google_service_account.vm_service_account, time_sleep.wait_for_api_propagation]
+}
+
+# Additional useful permissions for the VM service account
+resource "google_project_iam_member" "vm_service_account_logging" {
+  count      = var.create_service ? 1 : 0
+  project    = var.project_id
+  role       = "roles/logging.logWriter"
+  member     = "serviceAccount:${google_service_account.vm_service_account.email}"
+  depends_on = [google_service_account.vm_service_account, time_sleep.wait_for_api_propagation]
+}
+
+resource "google_project_iam_member" "vm_service_account_monitoring" {
+  count      = var.create_service ? 1 : 0
+  project    = var.project_id
+  role       = "roles/monitoring.metricWriter"
+  member     = "serviceAccount:${google_service_account.vm_service_account.email}"
+  depends_on = [google_service_account.vm_service_account, time_sleep.wait_for_api_propagation]
 }

@@ -46,3 +46,28 @@ output "feast_connection_string" {
 output "feast_connection_string_cloud_sql" {
   value = "postgresql+psycopg2://${var.db_user}:${random_password.db_password.result}@/feast?host=/cloudsql/${google_sql_database_instance.postgres.connection_name}"
 }
+
+output "postgres_host" {
+  value = google_sql_database_instance.postgres.public_ip_address
+}
+
+output "postgres_port" {
+  value = "5432"
+}
+
+output "postgres_database" {
+  value = "feast"
+}
+
+output "postgres_user" {
+  value = var.db_user
+}
+
+output "postgres_password" {
+  value     = random_password.db_password.result
+  sensitive = true
+}
+
+output "instance_name" {
+  value = google_sql_database_instance.postgres.name
+}

@@ -36,7 +36,7 @@ backend_store_uri = "{{ backend_uri }}"
 {% for stage in stack %}
   {% for stage_name, tool in stage.items() %}
     {% for key, value in tool.params.items() %}
-      {% if key == "service_name" and stage_name in ["experiment_tracking", "model_serving"] %}
+      {% if key == "service_name" and stage_name in ["experiment_tracking", "model_serving", "feature_store"] %}
 {{ stage_name }}_{{ tool.name }}_service_name = "{{ value }}"
       {% elif key == "service_name" %}
         {# Do not emit a generic service_name variable for other stages #}
@@ -56,6 +56,13 @@ artifact_bucket = "{{ tool.params.get('artifact_bucket', '') }}"
 {% endfor %}
 
 create_artifact_bucket = {{ create_artifact_bucket | lower }}
+
+# Enable/disable modules based on YAML configuration
+{% for stage in stack %}
+  {% for stage_name, tool in stage.items() %}
+enable_{{ stage_name }}_{{ tool.name }} = true
+  {% endfor %}
+{% endfor %}
 
 # Feast-specific configuration
 feast_bigquery_dataset = "feast_offline_store"
