@@ -91,6 +91,18 @@ variable "mlflow_port" {
   default     = 5000
 }
 
+variable "fastapi_port" {
+  description = "Port for FastAPI proxy server"
+  type        = number
+  default     = 8000
+}
+
+variable "fastapi_app_source" {
+  description = "Source location for FastAPI application main.py (GCS path, local file, or 'template' for default)"
+  type        = string
+  default     = "template"
+}
+
 variable "use_postgres" {
   description = "Whether to use PostgreSQL backend"
   type        = bool
@@ -163,7 +175,7 @@ variable "startup_script" {
 # --- Dynamic Variables from YAML ---
 # Add any extra YAML params as string variables if not already defined
 {%- set defined = [
-  "project_id", "region", "zone", "create_service", "create_bucket", "service_name", "vm_name", "machine_type", "disk_size_gb", "disk_type", "image_family", "artifact_bucket", "backend_store_uri", "image", "allow_public_access", "mlflow_port", "enable_https", "service_account_email", "network", "subnetwork", "allow_http_https", "use_postgres", "cloudsql_instance_annotation", "tags", "metadata", "startup_script"
+  "project_id", "region", "zone", "create_service", "create_bucket", "service_name", "vm_name", "machine_type", "disk_size_gb", "disk_type", "image_family", "artifact_bucket", "backend_store_uri", "image", "allow_public_access", "mlflow_port", "fastapi_port", "fastapi_app_source", "enable_https", "service_account_email", "network", "subnetwork", "allow_http_https", "use_postgres", "cloudsql_instance_annotation", "tags", "metadata", "startup_script"
 ] -%}
 {%- set seen = [] -%}
 {% for stage in stack %}

@@ -74,33 +74,16 @@ resource "time_sleep" "wait_for_api_propagation" {
     google_project_service.required_apis
   ]
 
-  create_duration = "180s"  # 3 minutes for API propagation
+  create_duration = "120s"  # 2 minutes for API propagation (sufficient for most cases)
 }
 
-# Verify API readiness before creating resources
+# Simple API readiness marker (no external dependencies)
 resource "null_resource" "api_readiness_check" {
   depends_on = [time_sleep.wait_for_api_propagation]
   
-  provisioner "local-exec" {
-    command = <<-EOT
-      echo "Verifying {{ 'Compute Engine and Cloud SQL APIs' if flags.needs_postgres else 'Compute Engine API' }} are ready..."
-      for i in {1..5}; do
-        {% if flags.needs_postgres %}
-        if gcloud compute zones list --project={{ project_id }} --limit=1 --format="value(name)" 2>/dev/null | grep -q . && \
-           gcloud sql instances list --project={{ project_id }} --limit=1 --format="value(name)" 2>/dev/null; then
-        {% else %}
-        if gcloud compute zones list --project={{ project_id }} --limit=1 --format="value(name)" 2>/dev/null | grep -q .; then
-        {% endif %}
-          echo "✅ APIs are ready!"
-          exit 0
-        else
-          echo "⏳ Attempt $i: APIs still propagating, waiting 30s..."
-          sleep 30
-        fi
-      done
-      echo "❌ API readiness check failed, but continuing..."
-      exit 0
-    EOT
+  # Simple trigger to ensure proper sequencing
+  triggers = {
+    api_wait_complete = timestamp()
   }
 }
 
@@ -182,6 +165,42 @@ resource "google_service_account" "vm_service_account" {
   
   # Explicit dependency to ensure APIs are ready FIRST
   depends_on = [null_resource.api_readiness_check]
+}
+
+# Project-level IAM bindings for the service account (these will show up in the IAM UI)
+{% for stage in stack %}
+  {% for stage_name, tool in stage.items() %}
+    {% if tool.name == "mlflow" and tool.params.get("artifact_bucket") %}
+resource "google_project_iam_member" "vm_service_account_storage_admin" {
+  project    = var.project_id
+  role       = "roles/storage.objectAdmin"
+  member     = "serviceAccount:${google_service_account.vm_service_account.email}"
+  depends_on = [google_service_account.vm_service_account, null_resource.api_readiness_check]
+}
+
+resource "google_project_iam_member" "vm_service_account_storage_viewer" {
+  project    = var.project_id
+  role       = "roles/storage.objectViewer"
+  member     = "serviceAccount:${google_service_account.vm_service_account.email}"
+  depends_on = [google_service_account.vm_service_account, null_resource.api_readiness_check]
+}
+    {% endif %}
+  {% endfor %}
+{% endfor %}
+
+# Additional useful permissions for the VM service account
+resource "google_project_iam_member" "vm_service_account_logging" {
+  project    = var.project_id
+  role       = "roles/logging.logWriter"
+  member     = "serviceAccount:${google_service_account.vm_service_account.email}"
+  depends_on = [google_service_account.vm_service_account, null_resource.api_readiness_check]
+}
+
+resource "google_project_iam_member" "vm_service_account_monitoring" {
+  project    = var.project_id
+  role       = "roles/monitoring.metricWriter"
+  member     = "serviceAccount:${google_service_account.vm_service_account.email}"
+  depends_on = [google_service_account.vm_service_account, null_resource.api_readiness_check]
 }
 
 # Define a Google Compute Engine instance
@@ -309,127 +328,796 @@ locals {
     echo "Testing Docker installation..."
     sudo docker run --rm hello-world
     
-    # Set up MLflow environment
-    echo "Setting up MLflow environment..."
+    # Set up containerized MLflow environment
+    echo "Setting up containerized MLflow environment..."
     
-    # Create a Python virtual environment
-    echo "Creating Python virtual environment..."
-    python3 -m venv /home/$CURRENT_USER/mlflow-env
-    source /home/$CURRENT_USER/mlflow-env/bin/activate
+    # Create deployment directory structure
+    mkdir -p /home/$CURRENT_USER/deployml/docker
+    mkdir -p /home/$CURRENT_USER/deployml/docker/mlflow
+    mkdir -p /home/$CURRENT_USER/deployml/docker/fastapi
     
-    # Upgrade pip in the virtual environment
-    echo "Upgrading pip..."
-    pip install --upgrade pip setuptools wheel
-    
-    # Install MLflow and dependencies
-    echo "Installing MLflow{{ ' with PostgreSQL support' if flags.needs_postgres else '' }}..."
-    pip install mlflow[extras] sqlalchemy{% if flags.needs_postgres %} psycopg2-binary{% endif %}
-    
-    # Verify MLflow installation
-    echo "Verifying MLflow installation..."
-    mlflow --version
-    
-    # Create MLflow configuration directory
-    mkdir -p /home/$CURRENT_USER/mlflow-config
-    mkdir -p /home/$CURRENT_USER/mlflow-data
-    
-    # Set up environment variables
-    export MLFLOW_SERVER_HOST=0.0.0.0
-    export MLFLOW_SERVER_PORT=5000
-    export MLFLOW_BACKEND_STORE_URI="${local.backend_store_uri}"
-    
-         {% if flags.needs_postgres %}
-     # Test PostgreSQL connection
-     echo "Testing PostgreSQL connection..."
-     python3 -c "
-import psycopg2
-from urllib.parse import urlparse
+    # Create Docker Compose file
+    echo "Creating Docker Compose configuration..."
+    cat > /home/$CURRENT_USER/deployml/docker/docker-compose.yml << 'DOCKER_COMPOSE_EOF'
+version: '3.8'
 
-connection_string = '${local.postgres_connection_string}'
-print('Testing connection to PostgreSQL...')
-try:
-    parsed = urlparse(connection_string)
-    conn = psycopg2.connect(
-        host=parsed.hostname,
-        port=parsed.port or 5432,
-        database=parsed.path[1:],  # Remove leading slash
-        user=parsed.username,
-        password=parsed.password
-    )
-    conn.close()
-    print('PostgreSQL connection successful!')
-except Exception as e:
-    print(f'PostgreSQL connection failed: {e}')
-    exit(1)
-"
-     {% endif %}
-     
-     {% if flags.mlflow_params.get('artifact_bucket') %}
-     if [ -n "{{ flags.mlflow_params.artifact_bucket }}" ]; then
-       export MLFLOW_DEFAULT_ARTIFACT_ROOT=gs://{{ flags.mlflow_params.artifact_bucket }}
-     fi
-     {% endif %}
+services:
+  mlflow:
+    build: 
+      context: ./mlflow
+      dockerfile: Dockerfile
+    container_name: mlflow-server
+    ports:
+      - "{{ flags.mlflow_params.mlflow_port }}:5000"
+    environment:
+      - MLFLOW_BACKEND_STORE_URI=${local.backend_store_uri}
+      - MLFLOW_DEFAULT_ARTIFACT_ROOT={% if flags.mlflow_params.get('artifact_bucket') %}gs://{{ flags.mlflow_params.artifact_bucket }}{% else %}./mlflow-artifacts{% endif %}
+      - MLFLOW_SERVER_HOST=0.0.0.0
+      - MLFLOW_SERVER_PORT=5000
+    volumes:
+      - mlflow-data:/app/mlflow-data
+      - mlflow-config:/app/mlflow-config
+    networks:
+      - mlflow-network
+    restart: unless-stopped
+    command: >
+      mlflow server 
+      --host 0.0.0.0 
+      --port 5000
+      --backend-store-uri ${local.backend_store_uri}
+      --default-artifact-root {% if flags.mlflow_params.get('artifact_bucket') %}gs://{{ flags.mlflow_params.artifact_bucket }}{% else %}./mlflow-artifacts{% endif %}
     
-    # Create systemd service for MLflow
-    echo "Creating MLflow systemd service{{ ' with PostgreSQL backend' if flags.needs_postgres else '' }}..."
-    sudo tee /etc/systemd/system/mlflow.service > /dev/null <<SERVICE_EOF
+  fastapi:
+    build:
+      context: ./fastapi
+      dockerfile: Dockerfile
+    container_name: fastapi-proxy
+    ports:
+      - "{{ flags.mlflow_params.get('fastapi_port', 8000) }}:8000"
+    environment:
+      - MLFLOW_BASE_URL=http://mlflow:5000
+      - MLFLOW_EXTERNAL_URL=$${EXTERNAL_MLFLOW_URL}
+      - FASTAPI_PORT=8000
+    depends_on:
+      - mlflow
+    networks:
+      - mlflow-network
+    restart: unless-stopped
+
+volumes:
+  mlflow-data:
+  mlflow-config:
+
+networks:
+  mlflow-network:
+    driver: bridge
+DOCKER_COMPOSE_EOF
+
+    # Create MLflow Dockerfile
+    echo "Creating MLflow Dockerfile..."
+    cat > /home/$CURRENT_USER/deployml/docker/mlflow/Dockerfile << 'MLFLOW_DOCKERFILE_EOF'
+FROM python:3.9-slim
+
+# Set working directory
+WORKDIR /app
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    curl \
+    {% if flags.needs_postgres %}postgresql-client \{% endif %}
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Python dependencies
+RUN pip install --upgrade pip setuptools wheel
+
+# Install MLflow and dependencies
+RUN pip install \
+    mlflow[extras] \
+    sqlalchemy \
+    {% if flags.needs_postgres %}psycopg2-binary \{% endif %}
+    google-cloud-storage \
+    boto3
+
+# Create mlflow user
+RUN useradd -m -s /bin/bash mlflow
+
+# Create directories
+RUN mkdir -p /app/mlflow-data /app/mlflow-config
+RUN chown -R mlflow:mlflow /app
+
+# Switch to mlflow user
+USER mlflow
+
+# Expose MLflow port
+EXPOSE 5000
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
+    CMD curl -f http://localhost:5000/health || exit 1
+
+# Default command
+CMD ["mlflow", "server", "--host", "0.0.0.0", "--port", "5000"]
+MLFLOW_DOCKERFILE_EOF
+
+    # Create FastAPI Dockerfile
+    echo "Creating FastAPI Dockerfile..."
+    cat > /home/$CURRENT_USER/deployml/docker/fastapi/Dockerfile << 'FASTAPI_DOCKERFILE_EOF'
+FROM python:3.9-slim
+
+# Set working directory
+WORKDIR /app
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Python dependencies
+RUN pip install --upgrade pip setuptools wheel
+
+# Install FastAPI and dependencies
+RUN pip install \
+    fastapi \
+    uvicorn \
+    httpx \
+    mlflow \
+    pandas \
+    joblib \
+    scikit-learn \
+    numpy \
+    google-cloud-storage \
+    google-cloud-core
+
+# Create fastapi user
+RUN useradd -m -s /bin/bash fastapi
+
+# Create app directory
+RUN mkdir -p /app/fastapi-app
+RUN chown -R fastapi:fastapi /app
+
+# Copy FastAPI application
+COPY main.py /app/fastapi-app/main.py
+
+# Switch to fastapi user
+USER fastapi
+
+# Expose FastAPI port
+EXPOSE 8000
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
+    CMD curl -f http://localhost:8000/health || exit 1
+
+# Default command
+CMD ["uvicorn", "fastapi-app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+FASTAPI_DOCKERFILE_EOF
+
+    # Setup FastAPI application
+    echo "Setting up FastAPI application..."
+    FASTAPI_SOURCE="{{ flags.mlflow_params.get('fastapi_app_source', 'template') }}"
+    
+    if [ "$FASTAPI_SOURCE" = "template" ]; then
+        echo "Using default containerized FastAPI template..."
+        # Create a containerized FastAPI application with MLflow proxy and model integration
+        cat > /home/$CURRENT_USER/deployml/docker/fastapi/main.py << 'FASTAPI_TEMPLATE_EOF'
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import RedirectResponse, HTMLResponse
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+import httpx
+import os
+from contextlib import asynccontextmanager
+import logging
+import asyncio
+import mlflow
+import pandas as pd
+from datetime import datetime
+from typing import Optional
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# MLflow configuration - use container name for inter-container communication
+MLFLOW_BASE_URL = os.getenv("MLFLOW_BASE_URL", "http://mlflow:5000")
+MLFLOW_EXTERNAL_URL = os.getenv("MLFLOW_EXTERNAL_URL", MLFLOW_BASE_URL)  # External URL for UI links
+FASTAPI_PORT = int(os.getenv("FASTAPI_PORT", "8000"))
+
+# Global variables for model
+model = None
+feature_names = None
+model_info = {
+    "name": None,
+    "version": None,
+    "loaded_at": None,
+    "last_checked": None,
+    "status": "initializing"
+}
+
+# Configuration for model refresh
+MODEL_CHECK_INTERVAL = int(os.getenv("MODEL_CHECK_INTERVAL", "300"))  # 5 minutes default
+AUTO_REFRESH_ENABLED = os.getenv("AUTO_REFRESH_ENABLED", "true").lower() == "true"
+
+# Pydantic model for prediction request
+class PredictionRequest(BaseModel):
+    sepal_length: float
+    sepal_width: float
+    petal_length: float
+    petal_width: float
+
+async def load_mlflow_model(model_name: str = None) -> bool:
+    """Load or reload the MLflow model. Returns True if successful."""
+    global model, feature_names, model_info
+    
+    # If no model name provided, don't attempt to load
+    if not model_name:
+        logger.info("No model name provided, skipping model load")
+        model_info.update({
+            "last_checked": datetime.now().isoformat(),
+            "status": "no_model_specified"
+        })
+        return False
+    
+    try:
+        logger.info(f"Loading/refreshing MLflow model: {model_name}")
+        mlflow_tracking_uri = os.getenv("MLFLOW_TRACKING_URI", MLFLOW_BASE_URL)
+        experiment_name = os.getenv("EXPERIMENT_NAME", "iris_experiment")
+        
+        mlflow.set_tracking_uri(mlflow_tracking_uri)
+        mlflow.set_experiment(experiment_name)
+        
+        # Get model info first
+        client = mlflow.tracking.MlflowClient()
+        try:
+            latest_version = client.get_latest_versions(model_name, stages=["None", "Staging", "Production"])
+            if latest_version:
+                # Get the latest version (highest version number)
+                latest_model = max(latest_version, key=lambda x: int(x.version))
+                model_version = latest_model.version
+                
+                # Check if this is a new version
+                if model_info["version"] == model_version and model is not None and model_info["name"] == model_name:
+                    logger.info(f"Model {model_name} version {model_version} already loaded, skipping refresh")
+                    model_info["last_checked"] = datetime.now().isoformat()
+                    return True
+                
+                logger.info(f"Loading model version: {model_version}")
+            else:
+                logger.warning("No model versions found, trying latest anyway")
+                model_version = "latest"
+        except Exception as e:
+            logger.warning(f"Could not get model version info: {e}, using 'latest'")
+            model_version = "latest"
+        
+        model_uri = f"models:/{model_name}/latest"
+        new_model = mlflow.pyfunc.load_model(model_uri)
+        
+        feature_names = [
+            "sepal length",
+            "sepal width", 
+            "petal length",
+            "petal width",
+        ]
+        
+        # Update model and info atomically
+        model = new_model
+        model_info.update({
+            "name": model_name,
+            "version": model_version,
+            "loaded_at": datetime.now().isoformat(),
+            "last_checked": datetime.now().isoformat(),
+            "status": "loaded"
+        })
+        
+        logger.info(f"✅ Successfully loaded model: {model_name} (version: {model_version})")
+        return True
+        
+    except Exception as e:
+        logger.error(f"❌ Failed to load MLflow model '{model_name}': {e}")
+        model_info.update({
+            "name": model_name,
+            "last_checked": datetime.now().isoformat(),
+            "status": "error",
+            "error": str(e)
+        })
+        return False
+
+async def check_for_model_updates():
+    """Background task to periodically check for model updates."""
+    while True:
+        try:
+            if AUTO_REFRESH_ENABLED and model_info["status"] == "loaded" and model_info.get("name"):
+                logger.info(f"Checking for updates to model: {model_info['name']}")
+                await load_mlflow_model(model_info["name"])
+            await asyncio.sleep(MODEL_CHECK_INTERVAL)
+        except Exception as e:
+            logger.error(f"Error in background model check: {e}")
+            await asyncio.sleep(MODEL_CHECK_INTERVAL)
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Application lifespan events"""
+    logger.info("FastAPI MLflow Proxy starting...")
+    logger.info(f"Proxying requests to MLflow at: {MLFLOW_BASE_URL}")
+    logger.info(f"Auto-refresh enabled: {AUTO_REFRESH_ENABLED}, Check interval: {MODEL_CHECK_INTERVAL}s")
+    
+    # Wait for MLflow to be ready
+    logger.info("Waiting for MLflow to be ready...")
+    max_retries = 30
+    for i in range(max_retries):
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.get(f"{MLFLOW_BASE_URL}/health", timeout=5.0)
+                if response.status_code == 200:
+                    logger.info("✅ MLflow is ready!")
+                    break
+        except Exception as e:
+            logger.info(f"Waiting for MLflow... (attempt {i+1}/{max_retries})")
+            if i == max_retries - 1:
+                logger.error(f"❌ MLflow not ready after {max_retries} attempts: {e}")
+            await asyncio.sleep(2)
+    
+    # Initialize model_info without loading a model
+    model_info.update({
+        "name": None,
+        "version": None,
+        "loaded_at": None,
+        "last_checked": datetime.now().isoformat(),
+        "status": "ready"
+    })
+    logger.info("✅ FastAPI ready - awaiting model selection")
+    
+    # Start background task for model checking
+    if AUTO_REFRESH_ENABLED:
+        asyncio.create_task(check_for_model_updates())
+    
+    yield
+    logger.info("FastAPI MLflow Proxy shutting down...")
+
+# Create FastAPI application
+app = FastAPI(
+    title="MLflow Model API",
+    description="Containerized FastAPI server with MLflow model integration for predictions and MLflow proxy",
+    version="1.0.0",
+    lifespan=lifespan
+)
+
+# Add CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+@app.get("/", response_class=HTMLResponse)
+async def root():
+    """Root endpoint with links to available services"""
+    # Determine status display
+    if model is not None:
+        model_status = "✅ Model Loaded"
+    elif model_info["status"] == "ready":
+        model_status = "⏳ Ready - No Model Selected"
+    elif model_info["status"] == "error":
+        model_status = "❌ Error Loading Model"
+    else:
+        model_status = "⏳ Initializing"
+    
+    model_version = model_info.get("version", "N/A")
+    loaded_at = model_info.get("loaded_at", "N/A")
+    last_checked = model_info.get("last_checked", "Never")
+    
+    html_content = """
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>MLflow Model API</title>
+        <style>
+            body { font-family: Arial, sans-serif; margin: 40px; }
+            h1 { color: #333; }
+            .links { margin: 20px 0; }
+            .link { display: block; padding: 10px; margin: 5px 0; background: #f0f0f0; text-decoration: none; border-radius: 5px; }
+            .link:hover { background: #e0e0e0; }
+            .container-info { background: #e7f3ff; padding: 15px; border-radius: 5px; margin: 20px 0; }
+            .model-status { background: #f0f8e7; padding: 15px; border-radius: 5px; margin: 20px 0; }
+            .refresh-section { background: #fff3cd; padding: 15px; border-radius: 5px; margin: 20px 0; }
+            .refresh-button { background: #28a745; color: white; padding: 8px 16px; border: none; border-radius: 4px; cursor: pointer; text-decoration: none; display: inline-block; }
+            .refresh-button:hover { background: #218838; }
+            .config-info { background: #e2e3e5; padding: 15px; border-radius: 5px; margin: 20px 0; font-size: 0.9em; }
+        </style>
+        <script>
+            async function refreshModel() {
+                const button = document.getElementById('refresh-btn');
+                const modelNameInput = document.getElementById('model-name-input');
+                const modelName = modelNameInput.value.trim();
+                
+                if (!modelName) {
+                    alert('Please enter a model name');
+                    return;
+                }
+                
+                button.disabled = true;
+                button.textContent = 'Loading...';
+                
+                try {
+                    const response = await fetch('/refresh-model', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json'
+                        },
+                        body: JSON.stringify({ model_name: modelName })
+                    });
+                    const result = await response.json();
+                    
+                    if (response.ok) {
+                        alert('Model loaded successfully!');
+                        location.reload();
+                    } else {
+                        alert('Failed to load model: ' + result.detail);
+                    }
+                } catch (error) {
+                    alert('Error loading model: ' + error.message);
+                } finally {
+                    button.disabled = false;
+                    button.textContent = '🔄 Load Model';
+                }
+            }
+        </script>
+    </head>
+    <body>
+        <h1>🚀 MLflow Model API</h1>
+        <div class="container-info">
+            <h3>🐳 Containerized Deployment</h3>
+            <p>This FastAPI server is running in a Docker container with MLflow model integration.</p>
+            <p><strong>MLflow URL:</strong> """ + MLFLOW_EXTERNAL_URL + """</p>
+        </div>
+        <div class="model-status">
+            <h3>🤖 Model Status</h3>
+            <p><strong>Status:</strong> """ + model_status + """</p>
+            <p><strong>Model:</strong> """ + str(model_info.get('name', 'None')) + """</p>
+            <p><strong>Version:</strong> """ + str(model_version) + """</p>
+            <p><strong>Loaded At:</strong> """ + str(loaded_at) + """</p>
+            <p><strong>Last Checked:</strong> """ + str(last_checked) + """</p>
+        </div>
+        <div class="refresh-section">
+            <h3>🔄 Model Management</h3>
+            <p>Enter the MLflow model name to load:</p>
+            <input type="text" id="model-name-input" placeholder="Enter model name (e.g., iris_model)" style="padding: 8px; margin: 10px 0; width: 300px; border: 1px solid #ccc; border-radius: 4px;">
+            <br>
+            <button id="refresh-btn" class="refresh-button" onclick="refreshModel()">🔄 Load Model</button>
+        </div>
+        <div class="config-info">
+            <h3>⚙️ Configuration</h3>
+            <p><strong>Auto-refresh:</strong> """ + ('Enabled' if AUTO_REFRESH_ENABLED else 'Disabled') + """</p>
+            <p><strong>Check Interval:</strong> """ + str(MODEL_CHECK_INTERVAL) + """ seconds</p>
+            <p><strong>MLflow URL:</strong> """ + MLFLOW_EXTERNAL_URL + """</p>
+            <p><strong>Deployment:</strong> Containerized</p>
+        </div>
+        <div class="links">
+            <a class="link" href="/docs">🔮 Model Prediction (Interactive API)</a>
+            <a class="link" href="/model-info">📋 Model Information</a>
+            <a class="link" href="/mlflow">📊 MLflow UI</a>
+            <a class="link" href="/health">🏥 Health Check</a>
+            <a class="link" href="/container-info">🐳 Container Info</a>
+        </div>
+    </body>
+    </html>
+    """
+    return HTMLResponse(content=html_content)
+
+@app.post("/predict")
+async def predict(data: PredictionRequest):
+    """Predict using the loaded MLflow model"""
+    if model is None:
+        raise HTTPException(
+            status_code=503, 
+            detail="Model not loaded. Please check MLflow configuration and ensure model exists."
+        )
+    
+    try:
+        # Convert request to DataFrame
+        input_data = pd.DataFrame([data.dict()])
+        input_data = input_data[
+            ["sepal_length", "sepal_width", "petal_length", "petal_width"]
+        ]
+        
+        # Rename columns to match training data
+        input_data.columns = feature_names
+        
+        # Make prediction
+        predictions = model.predict(input_data)
+        
+        return {
+            "predictions": predictions.tolist(),
+            "model_info": "MLflow loaded model",
+            "input_features": data.dict(),
+            "deployment": "containerized"
+        }
+        
+    except Exception as e:
+        logger.error(f"Prediction error: {e}")
+        raise HTTPException(
+            status_code=500, 
+            detail=f"Prediction failed: {str(e)}"
+        )
+
+class ModelRefreshRequest(BaseModel):
+    model_name: str
+
+@app.post("/refresh-model")
+async def refresh_model(request: ModelRefreshRequest):
+    """Manually load or refresh the MLflow model"""
+    logger.info(f"Manual model load requested: {request.model_name}")
+    success = await load_mlflow_model(request.model_name)
+    
+    if success:
+        return {
+            "status": "success",
+            "message": f"Model '{request.model_name}' loaded successfully",
+            "model_info": model_info
+        }
+    else:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to load model '{request.model_name}': {model_info.get('error', 'Unknown error')}"
+        )
+
+@app.get("/model-info")
+async def get_model_info():
+    """Get current model information"""
+    return {
+        "model_loaded": model is not None,
+        "model_info": model_info,
+        "config": {
+            "auto_refresh_enabled": AUTO_REFRESH_ENABLED,
+            "check_interval_seconds": MODEL_CHECK_INTERVAL,
+            "mlflow_tracking_uri": os.getenv("MLFLOW_TRACKING_URI", "sqlite:///mlflow.db"),
+            "experiment_name": os.getenv("EXPERIMENT_NAME", "iris_experiment")
+        },
+        "deployment": "containerized"
+    }
+
+@app.get("/health")
+async def health_check():
+    """Health check endpoint"""
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(f"{MLFLOW_BASE_URL}/health", timeout=5.0)
+            if response.status_code == 200:
+                return {
+                    "status": "healthy",
+                    "mlflow": "connected",
+                    "mlflow_url": MLFLOW_BASE_URL,
+                    "proxy_port": FASTAPI_PORT,
+                    "deployment": "containerized",
+                    "model_loaded": model is not None
+                }
+            else:
+                return {
+                    "status": "unhealthy",
+                    "mlflow": "disconnected",
+                    "mlflow_status_code": response.status_code,
+                    "deployment": "containerized",
+                    "model_loaded": model is not None
+                }
+    except Exception as e:
+        logger.error(f"Health check failed: {e}")
+        return {
+            "status": "unhealthy",
+            "error": str(e),
+            "mlflow_url": MLFLOW_BASE_URL,
+            "deployment": "containerized",
+            "model_loaded": model is not None
+        }
+
+@app.get("/container-info")
+async def container_info():
+    """Container information endpoint"""
+    return {
+        "container_name": "fastapi-proxy",
+        "mlflow_container": "mlflow-server",
+        "mlflow_url": MLFLOW_BASE_URL,
+        "network": "mlflow-network",
+        "ports": {
+            "fastapi": FASTAPI_PORT,
+            "mlflow": 5000
+        },
+        "model_loaded": model is not None
+    }
+
+@app.get("/mlflow", include_in_schema=False)
+async def mlflow_ui_redirect():
+    """Redirect to MLflow UI"""
+    return RedirectResponse(url=f"{MLFLOW_EXTERNAL_URL}/")
+
+@app.get("/mlflow/{path:path}", include_in_schema=False)
+async def proxy_mlflow_ui(path: str, request: Request):
+    """Proxy MLflow UI requests"""
+    try:
+        query_params = str(request.url.query)
+        url = f"{MLFLOW_BASE_URL}/{path}"
+        if query_params:
+            url += f"?{query_params}"
+        
+        async with httpx.AsyncClient() as client:
+            response = await client.get(url, headers=dict(request.headers))
+            return response.content
+    except Exception as e:
+        logger.error(f"MLflow UI proxy error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.api_route("/api/2.0/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH"], include_in_schema=False)
+async def proxy_mlflow_api(path: str, request: Request):
+    """Proxy MLflow API requests"""
+    try:
+        query_params = str(request.url.query)
+        url = f"{MLFLOW_BASE_URL}/api/2.0/{path}"
+        if query_params:
+            url += f"?{query_params}"
+        
+        async with httpx.AsyncClient() as client:
+            response = await client.request(
+                method=request.method,
+                url=url,
+                headers=dict(request.headers),
+                content=await request.body()
+            )
+            return response.content
+    except Exception as e:
+        logger.error(f"MLflow API proxy error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=FASTAPI_PORT)
+FASTAPI_TEMPLATE_EOF
+        echo "✅ Default FastAPI template created successfully!"
+    elif [[ "$FASTAPI_SOURCE" == gs://* ]]; then
+        echo "Downloading FastAPI application from GCS: $FASTAPI_SOURCE"
+        if gsutil cp "$FASTAPI_SOURCE" /home/$CURRENT_USER/deployml/docker/fastapi/main.py; then
+            echo "✅ FastAPI application downloaded successfully from GCS!"
+        else
+            echo "❌ ERROR: Failed to download FastAPI application from GCS: $FASTAPI_SOURCE"
+            echo "Please ensure the file exists and you have proper permissions."
+            exit 1
+        fi
+    elif [[ "$FASTAPI_SOURCE" == /* ]]; then
+        echo "Copying FastAPI application from local path: $FASTAPI_SOURCE"
+        if [ -f "$FASTAPI_SOURCE" ]; then
+            cp "$FASTAPI_SOURCE" /home/$CURRENT_USER/deployml/docker/fastapi/main.py
+            echo "✅ FastAPI application copied successfully!"
+        else
+            echo "❌ ERROR: FastAPI application not found at: $FASTAPI_SOURCE"
+            echo "Please provide a valid file path or use 'template' for the default application."
+            exit 1
+        fi
+    else
+        echo "❌ ERROR: Invalid FastAPI source: $FASTAPI_SOURCE"
+        echo "Supported sources:"
+        echo "  - 'template' for default FastAPI application"
+        echo "  - 'gs://bucket/path/main.py' for GCS file"
+        echo "  - '/absolute/path/main.py' for local file"
+        exit 1
+    fi
+
+    # Set proper permissions
+    echo "Setting proper permissions for user: $CURRENT_USER"
+    sudo chown -R $CURRENT_USER:$CURRENT_USER /home/$CURRENT_USER/deployml
+    
+    # Create systemd service for Docker Compose
+    echo "Creating Docker Compose systemd service..."
+    sudo tee /etc/systemd/system/mlflow-docker.service > /dev/null <<DOCKER_SERVICE_EOF
 [Unit]
-Description=MLflow Server{{ ' with PostgreSQL Backend' if flags.needs_postgres else '' }}
-After=network.target
+Description=MLflow Docker Compose Stack
+After=network.target docker.service
+Requires=docker.service
 
 [Service]
-Type=simple
+Type=oneshot
+RemainAfterExit=true
 User=$CURRENT_USER
 Group=$CURRENT_USER
-WorkingDirectory=/home/$CURRENT_USER
-Environment=PATH=/home/$CURRENT_USER/mlflow-env/bin
-Environment=MLFLOW_SERVER_HOST=0.0.0.0
-Environment=MLFLOW_SERVER_PORT=5000
+WorkingDirectory=/home/$CURRENT_USER/deployml/docker
 Environment=MLFLOW_BACKEND_STORE_URI=${local.backend_store_uri}
-{% if flags.mlflow_params.get('artifact_bucket') %}
-Environment=MLFLOW_DEFAULT_ARTIFACT_ROOT=gs://{{ flags.mlflow_params.artifact_bucket }}
-{% endif %}
-ExecStart=/home/$CURRENT_USER/mlflow-env/bin/mlflow server --host 0.0.0.0 --port {{ flags.mlflow_params.mlflow_port }} --backend-store-uri ${local.backend_store_uri}
-Restart=always
-RestartSec=10
+Environment=MLFLOW_DEFAULT_ARTIFACT_ROOT={% if flags.mlflow_params.get('artifact_bucket') %}gs://{{ flags.mlflow_params.artifact_bucket }}{% else %}./mlflow-artifacts{% endif %}
+ExecStart=/usr/bin/docker compose up -d
+ExecStop=/usr/bin/docker compose down
+ExecReload=/usr/bin/docker compose restart
+Restart=no
 StandardOutput=journal
 StandardError=journal
 
 [Install]
 WantedBy=multi-user.target
-SERVICE_EOF
+DOCKER_SERVICE_EOF
+
+    # Get external IP and set environment variable for MLflow external URL
+    echo "Getting external IP for MLflow URL..."
+    EXTERNAL_IP=$(curl -s http://metadata.google.internal/computeMetadata/v1/instance/network-interfaces/0/access-configs/0/external-ip -H "Metadata-Flavor: Google")
+    echo "External IP: $EXTERNAL_IP"
     
-    # Set proper permissions
-    sudo chown -R $CURRENT_USER:$CURRENT_USER /home/$CURRENT_USER/mlflow-config
-    sudo chown -R $CURRENT_USER:$CURRENT_USER /home/$CURRENT_USER/mlflow-data
+    # Create .env file for Docker Compose
+    echo "Creating environment file for Docker Compose..."
+    cat > /home/$CURRENT_USER/deployml/docker/.env << ENV_EOF
+EXTERNAL_MLFLOW_URL=http://$EXTERNAL_IP:{{ flags.mlflow_params.mlflow_port }}
+ENV_EOF
     
-    # Enable and start MLflow service
-    echo "Enabling and starting MLflow service..."
+    # Build Docker containers first
+    echo "Building Docker containers..."
+    cd /home/$CURRENT_USER/deployml/docker
+    sudo -u $CURRENT_USER docker compose build
+    
+    # Reload systemd and enable Docker Compose service
+    echo "Enabling Docker Compose service..."
     sudo systemctl daemon-reload
-    sudo systemctl enable mlflow.service
-    sudo systemctl start mlflow.service
+    sudo systemctl enable mlflow-docker.service
     
-    # Check service status
-    echo "Checking MLflow service status..."
-    sudo systemctl status mlflow.service --no-pager
+    echo "Starting Docker containers via systemd..."
+    sudo systemctl start mlflow-docker.service
     
-    # Wait for MLflow to start
-    echo "Waiting for MLflow server to start..."
+    # Wait for containers to start
+    echo "Waiting for containers to start..."
     sleep 30
     
-    # Test MLflow server
-    echo "Testing MLflow server..."
-    curl -f http://localhost:5000/health || echo "MLflow server health check failed, but continuing..."
+    # Check Docker Compose service status
+    echo "Checking Docker Compose service status..."
+    sudo systemctl status mlflow-docker --no-pager
     
-         echo "MLflow VM setup{{ ' with PostgreSQL backend' if flags.needs_postgres else '' }} completed successfully!"
-     echo "MLflow server should be accessible at http://$(curl -s http://metadata.google.internal/computeMetadata/v1/instance/network-interfaces/0/access-configs/0/external-ip -H 'Metadata-Flavor: Google'):{{ flags.mlflow_params.mlflow_port }}"
-     echo "Backend store: {{ 'PostgreSQL' if flags.needs_postgres else 'SQLite' }}"
-     {% if flags.mlflow_params.get('artifact_bucket') %}
-     echo "Artifact store: gs://{{ flags.mlflow_params.artifact_bucket }}"
-     {% endif %}
+    # Check container status
+    echo "Checking container status..."
+    sudo -u $CURRENT_USER docker ps
     
-    # Log final status
-    echo "$(date): MLflow VM setup completed!"
+    # Test MLflow container
+    echo "Testing MLflow container..."
+    for i in {1..10}; do
+      if curl -s http://localhost:{{ flags.mlflow_params.mlflow_port }}/health > /dev/null; then
+        echo "✅ MLflow container is running successfully!"
+        break
+      else
+        echo "Attempt $i: MLflow container not responding yet..."
+        if [ $i -eq 10 ]; then
+          echo "⚠️  MLflow container may still be starting up..."
+          echo "Checking MLflow container logs..."
+          sudo -u $CURRENT_USER docker logs mlflow-server
+        fi
+        sleep 15
+      fi
+    done
+    
+    # Test FastAPI container
+    echo "Testing FastAPI container..."
+    for i in {1..10}; do
+      if curl -s http://localhost:{{ flags.mlflow_params.get('fastapi_port', 8000) }}/health > /dev/null; then
+        echo "✅ FastAPI container is running successfully!"
+        break
+      else
+        echo "Attempt $i: FastAPI container not responding yet..."
+        if [ $i -eq 10 ]; then
+          echo "⚠️  FastAPI container may still be starting up..."
+          echo "Checking FastAPI container logs..."
+          sudo -u $CURRENT_USER docker logs fastapi-proxy
+        fi
+        sleep 15
+      fi
+    done
+    
+    # Get external IP for display
+    EXTERNAL_IP=$(curl -s http://metadata.google.internal/computeMetadata/v1/instance/network-interfaces/0/access-configs/0/external-ip -H "Metadata-Flavor: Google")
+    echo "🐳 Containerized MLflow deployment{{ ' with PostgreSQL backend' if flags.needs_postgres else '' }} completed successfully!"
+    echo "🌐 MLflow UI will be available at: http://$EXTERNAL_IP:{{ flags.mlflow_params.mlflow_port }}"
+    echo "🚀 FastAPI Proxy will be available at: http://$EXTERNAL_IP:{{ flags.mlflow_params.get('fastapi_port', 8000) }}"
+    echo "📊 Container Info: http://$EXTERNAL_IP:{{ flags.mlflow_params.get('fastapi_port', 8000) }}/container-info"
+    echo "🔧 SSH into the VM with: gcloud compute ssh {{ flags.mlflow_params.vm_name }} --zone={{ zone }}"
+    echo "🐳 Manage containers: docker ps, docker logs mlflow-server, docker logs fastapi-proxy"
+    echo "🔧 Docker Compose: docker compose up -d, docker compose down, docker compose restart"
+    echo "Backend store: {{ 'PostgreSQL' if flags.needs_postgres else 'SQLite' }}"
+    {% if flags.mlflow_params.get('artifact_bucket') %}
+    echo "Artifact store: gs://{{ flags.mlflow_params.artifact_bucket }}"
+    {% endif %}
+    
+    echo "$(date): VM setup completed successfully!"
+    echo "Startup script completed successfully" | sudo tee /var/log/mlflow-startup-complete.log
     
 EOF
 }
@@ -445,6 +1133,22 @@ resource "google_compute_firewall" "allow_mlflow" {
   allow {
     protocol = "tcp"
     ports    = ["{{ flags.mlflow_params.mlflow_port }}"]
+  }
+  source_ranges = ["0.0.0.0/0"]
+  target_tags   = ["mlflow-server"]
+}
+
+# Firewall rule to allow FastAPI traffic
+resource "google_compute_firewall" "allow_fastapi" {
+  name    = "allow-fastapi"
+  network = "default"
+  
+  # Explicit dependency to ensure APIs are ready FIRST
+  depends_on = [null_resource.api_readiness_check]
+  
+  allow {
+    protocol = "tcp"
+    ports    = ["{{ flags.mlflow_params.get('fastapi_port', 8000) }}"]
   }
   source_ranges = ["0.0.0.0/0"]
   target_tags   = ["mlflow-server"]
@@ -496,6 +1200,29 @@ output "service_url" {
   value = "http://${google_compute_instance.mlflow_vm.network_interface[0].access_config[0].nat_ip}:{{ flags.mlflow_params.mlflow_port }}"
 }
 
+output "fastapi_url" {
+  value = "http://${google_compute_instance.mlflow_vm.network_interface[0].access_config[0].nat_ip}:{{ flags.mlflow_params.get('fastapi_port', 8000) }}"
+}
+
+output "fastapi_health_url" {
+  value = "http://${google_compute_instance.mlflow_vm.network_interface[0].access_config[0].nat_ip}:{{ flags.mlflow_params.get('fastapi_port', 8000) }}/health"
+}
+
+output "container_info_url" {
+  value = "http://${google_compute_instance.mlflow_vm.network_interface[0].access_config[0].nat_ip}:{{ flags.mlflow_params.get('fastapi_port', 8000) }}/container-info"
+}
+
+output "docker_commands" {
+  value = {
+    check_containers = "docker ps"
+    mlflow_logs      = "docker logs mlflow-server"
+    fastapi_logs     = "docker logs fastapi-proxy"
+    restart_services = "docker compose restart"
+    stop_services    = "docker compose down"
+    start_services   = "docker compose up -d"
+  }
+}
+
 output "vm_name" {
   value = "{{ flags.mlflow_params.vm_name }}"
 }
@@ -514,6 +1241,28 @@ output "bucket_name" {
 # Zone output
 output "deployment_zone" {
   value = "{{ zone }}"
+}
+
+# Debug outputs for IAM troubleshooting
+output "service_account_email" {
+  description = "Email of the created service account"
+  value       = google_service_account.vm_service_account.email
+}
+
+output "iam_debug_info" {
+  description = "Debug information for IAM configuration"
+  value = {
+    service_account_id = google_service_account.vm_service_account.account_id
+    project_id         = var.project_id
+    {% for stage in stack %}
+      {% for stage_name, tool in stage.items() %}
+        {% if tool.name == "mlflow" and tool.params.get("artifact_bucket") %}
+    artifact_bucket    = "{{ tool.params.artifact_bucket }}"
+    iam_bindings_created = "yes - storage permissions applied"
+        {% endif %}
+      {% endfor %}
+    {% endfor %}
+  }
 }
 
 
