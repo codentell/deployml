@@ -1,6 +1,8 @@
 from feast import Entity, FeatureView, FileSource, Field, FeatureService, PushSource
 from feast.types import Int64, Float32
 from feast.value_type import ValueType
+from feast.feature_logging import LoggingConfig
+from feast.infra.offline_stores.file_source import FileLoggingDestination
 from datetime import timedelta
 import pandas as pd
 
@@ -8,15 +10,15 @@ import pandas as pd
 mls_id = Entity(
     name="MLS_ID",
     join_keys=["MLS ID"],           # column name in your data
-    value_type=ValueType.INT64
+    value_type=ValueType.INT64,
+    description="The MLS ID of the house"
 )
 
 # Define offline source
 housing_source = FileSource(
     name="housing_source",
     path="data/house_data.parquet",
-    timestamp_field="datetime"
-    # file_format="csv"  # ✅ Explicitly tell Feast it’s a CSV file
+    timestamp_field="event_timestamp"
 )
 
 # Define feature view
@@ -45,11 +47,6 @@ housing_fv = FeatureView(
 )
 
 
-
-# entities = [mls_id]
-# feature_views = [housing_fv]
-# feature_services = [housing_service_v1]
-
 push_source = PushSource(
     name="house_push_source",
     batch_source=housing_source
@@ -57,5 +54,14 @@ push_source = PushSource(
 
 housing_service_v1 = FeatureService(
     name="housing_v1",
-    features=[housing_fv]
+    features=[housing_fv[["Price", "Lot Size", "Year Built"]]],
+    logging_config=LoggingConfig(
+        destination=FileLoggingDestination(path="data")
+    ),
 )
+
+housing_stats_push_source = PushSource(
+    name="driver_stats_push_source",
+    batch_source=housing_source,
+)
+
