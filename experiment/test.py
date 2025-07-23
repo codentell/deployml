@@ -17,5 +17,5 @@ features = store.get_online_features(
     ],
     entity_rows=entity_rows
 ).to_df()
-
+store.materialize_incremental(end_date=datetime.now())
 print(features.head())
