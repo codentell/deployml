@@ -1,0 +1,58 @@
+
+@
+ 
+MLS_ID"MLS IDJdeployml2025
+¸ÛÄğæÏ¸ÛÄğæÏ
+C
+#
+__dummy"
+__dummy_idJdeployml2025
+¸ÛÄ€¯Ò¸ÛÄ€¯Ò1"$e6c127d0-077e-4584-9bd9-b73345068382*¿ÛÄØ³Ìá2à
+§
+housing_featuresdeployml2025MLS_ID"	
+Price"
+City"	
+State"
+Bedrooms"
+	Bathrooms"
+Area (Sqft)"
+Lot Size"
+
+Year Built"
+Days on Market"
+Property Type"
+Listing Agent"
+
+Status"
+Zipcode_encoded*
+teamreal_estate2€…Ç{:‹datetimeZdata/house_data.parquetŠ1feast.infra.offline_stores.file_source.FileSource¢housing_source’¸ÛÄèëŠ"¸ÛÄè×Ç@b
+
+MLS ID4
+¸ÛÄ¨ïÔ¿ÛÄ°”¿á
+¿ÖºÈĞ—ñ€Ì€Ä:ğ
+Ï
+
+housing_v1deployml2025²
+housing_features	
+Price
+City	
+State
+Bedrooms
+	Bathrooms
+Area (Sqft)
+Lot Size
+
+Year Built
+Days on Market
+Property Type
+Listing Agent
+
+Status
+Zipcode_encodedBWdatetimeZdata/house_data.parquet¢housing_source’¸ÛÄèëŠ"¸ÛÄè×Ç
+¸ÛÄøãİ¸ÛÄøãİRŸ
+œ
+,feast.infra.online_stores.sqlite.SqliteTable"l
+K/Users/animaznman/Documents/GitHub/deployml/experiment/data/online_store.dbdeployml2025_housing_featuresbšdatetimeZdata/house_data.parquetŠ1feast.infra.offline_stores.file_source.FileSource¢housing_sourceªdeployml2025’¸ÛÄèëŠ"¸ÛÄè×Çb½	Šfeast.data_source.PushSource¢house_push_sourceªdeployml2025ÒWdatetimeZdata/house_data.parquet¢housing_source’¸ÛÄèëŠ"¸ÛÄè×Ç’¸ÛÄˆÛ†‹"¸ÛÄ¸ÛËŠ.
+
+deployml2025
+¸ÛÄø©¦‹¸ÛÄø©¦‹
