@@ -14,15 +14,14 @@ subprocess.run(["feast", "apply"], cwd="experiment")
 
 
 timestamps = pd.date_range(
-    start="2025-07-23",    
-    end="2027-07-24",     
+    start="2000-01-01",    
+    end="2008-03-18",     
     ).to_frame(name="event_timestamp", index=False)
 
 
 
 mls_ids = pd.DataFrame(data=[104635, 535721, 900458, 318589,
-899716,
-876426], 
+899716,876426], 
                           columns=["MLS ID"])
 
 
@@ -65,7 +64,8 @@ print("Historical features DataFrame columns:", historical_features_df.columns.t
 print("Historical features DataFrame head:")
 print(historical_features_df.head())
 
-store.materialize_incremental(end_date=datetime.now())
+store.materialize(start_date = datetime.strptime("2000-01-01", "%Y-%m-%d"),
+                  end_date = datetime.strptime("2008-03-18", "%Y-%m-%d"))
 
 
 
