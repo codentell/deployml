@@ -27,7 +27,7 @@ stack:
       # name: wandb
       params: 
         image: gcr.io/mlops-intro-461805/mlflow/mlflow:latest
-        backend_store_uri: postgresql
+        backend_store_uri: sqlite
         # backend_store_uri: sqlite
         # backend_store_uri: postgresql
   - feature_store:
@@ -35,7 +35,7 @@ stack:
       params:
         image: gcr.io/mlops-intro-461805/feast/feast:latest
         service_name: feast-server
-        backend_store_uri: postgresql
+        backend_store_uri: sqlite
   - model_serving:
       name: fastapi
       params:

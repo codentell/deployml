@@ -97,7 +97,7 @@ resource "google_cloud_run_service_iam_member" "public" {
 
 # Grant Cloud Run service account access to the artifact bucket
 resource "google_storage_bucket_iam_member" "mlflow_service_access" {
-  count  = var.artifact_bucket != "" ? 1 : 0
+  count  = var.artifact_bucket != "" && var.bucket_exists ? 1 : 0
   bucket = var.artifact_bucket
   role   = "roles/storage.objectAdmin"
   member = "serviceAccount:${data.google_project.current.number}-compute@developer.gserviceaccount.com"
