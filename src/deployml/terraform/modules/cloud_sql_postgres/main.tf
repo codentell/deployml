@@ -36,6 +36,10 @@ resource "google_sql_database" "feast_db" {
   instance = google_sql_database_instance.postgres.name
   project  = var.project_id
   depends_on = [google_sql_database_instance.postgres]
+  
+  lifecycle {
+    ignore_changes = [name]
+  }
 }
 
 resource "google_sql_user" "users" {

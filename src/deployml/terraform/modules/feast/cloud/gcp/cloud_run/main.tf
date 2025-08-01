@@ -73,17 +73,7 @@ resource "google_cloud_run_service" "feast" {
         
         env {
           name  = "FEAST_OFFLINE_STORE_TYPE"
-          value = "bigquery"
-        }
-        
-        env {
-          name  = "FEAST_OFFLINE_STORE_PROJECT"
-          value = var.project_id
-        }
-        
-        env {
-          name  = "FEAST_OFFLINE_STORE_DATASET"
-          value = var.bigquery_dataset
+          value = "file"
         }
         
         env {
@@ -102,19 +92,15 @@ resource "google_cloud_run_service" "feast" {
           }
         }
         
-        ports {
-          container_port = 8080
-        }
-        
         startup_probe {
           http_get {
             path = "/health"
             port = 8080
           }
-          initial_delay_seconds = 60
-          timeout_seconds = 5
-          period_seconds = 10
-          failure_threshold = 3
+          failure_threshold     = 20       # Allow 20 failed attempts
+          initial_delay_seconds = 240      # Wait 2 minutes before first check
+          period_seconds        = 30       # Check every 30 seconds
+          timeout_seconds       = 10       # Each check times out after 10 seconds
         }
         
         liveness_probe {
@@ -122,7 +108,7 @@ resource "google_cloud_run_service" "feast" {
             path = "/health"
             port = 8080
           }
-          initial_delay_seconds = 120
+          initial_delay_seconds = 240
           timeout_seconds = 25
           period_seconds = 30
           failure_threshold = 3
@@ -215,5 +201,6 @@ resource "google_bigquery_dataset" "feast_dataset" {
   
   lifecycle {
     ignore_changes = [dataset_id]
+    prevent_destroy = true
   }
 }

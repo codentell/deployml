@@ -47,15 +47,16 @@ module "cloud_sql_postgres" {
 }
 
 # Create separate feast database in the same PostgreSQL instance
-resource "google_sql_database" "feast_db" {
-  name     = "feast"
-  instance = module.cloud_sql_postgres.instance_name
-  depends_on = [module.cloud_sql_postgres]
+# resource "google_sql_database" "feast_db" {
+#   name     = "feast"
+#   instance = module.cloud_sql_postgres.instance_name
+#   depends_on = [module.cloud_sql_postgres]
   
-  lifecycle {
-    ignore_changes = [name]
-  }
-}
+#   lifecycle {
+#     ignore_changes = [name]
+#   }
+# }
+
 {% endif %}
 {% endblock %}
 
