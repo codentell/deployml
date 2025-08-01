@@ -24,13 +24,25 @@ provider "google" {
   zone    = "{{ zone }}"
 }
 
-# Detect PostgreSQL and collect MLflow configuration from all stages
-{% set flags = namespace(needs_postgres=false, first_tool_name="", mlflow_params={}) %}
+# Detect PostgreSQL and collect service configurations from all stages
+{% set flags = namespace(needs_postgres=false, needs_feast=false, first_tool_name="", mlflow_params={}, feast_params={}) %}
 {% for stage in stack %}
   {% for stage_name, tool in stage.items() %}
     {% if tool.name == "mlflow" %}
       {% for key, value in tool.params.items() %}
         {% set _ = flags.mlflow_params.update({key: value}) %}
+      {% endfor %}
+      {% if tool.params.get("backend_store_uri", "") == "postgresql" %}
+        {% set flags.needs_postgres = true %}
+        {% if not flags.first_tool_name %}
+          {% set flags.first_tool_name = tool.name %}
+        {% endif %}
+      {% endif %}
+    {% endif %}
+    {% if tool.name == "feast" %}
+      {% set flags.needs_feast = true %}
+      {% for key, value in tool.params.items() %}
+        {% set _ = flags.feast_params.update({key: value}) %}
       {% endfor %}
       {% if tool.params.get("backend_store_uri", "") == "postgresql" %}
         {% set flags.needs_postgres = true %}
@@ -58,6 +70,11 @@ resource "google_project_service" "required_apis" {
     "sql-component.googleapis.com",             # Cloud SQL component API
     "servicenetworking.googleapis.com",         # For private service connections
     "cloudkms.googleapis.com",                  # For encryption keys (if using CMEK)
+    {% endif %}
+    {% if flags.needs_feast %}
+    "bigquery.googleapis.com",                  # BigQuery API (for Feast offline store)
+    "datastore.googleapis.com",                 # Datastore API (for Feast online store option)
+    "bigtable.googleapis.com",                  # Bigtable API (for Feast online store option)
     {% endif %}
   ])
 
@@ -203,6 +220,47 @@ resource "google_project_iam_member" "vm_service_account_monitoring" {
   depends_on = [google_service_account.vm_service_account, null_resource.api_readiness_check]
 }
 
+{% if flags.needs_feast %}
+# BigQuery dataset for Feast offline store
+resource "google_bigquery_dataset" "feast_offline_store" {
+  count       = var.create_bigquery_dataset ? 1 : 0
+  dataset_id  = var.bigquery_dataset
+  project     = var.project_id
+  location    = var.region
+  
+  description = "Feast offline store dataset"
+  
+  labels = {
+    component  = "feast-offline-store"
+    managed-by = "terraform"
+  }
+  
+  depends_on = [null_resource.api_readiness_check]
+}
+
+# BigQuery permissions for Feast
+resource "google_project_iam_member" "vm_service_account_bigquery_user" {
+  project    = var.project_id
+  role       = "roles/bigquery.user"
+  member     = "serviceAccount:${google_service_account.vm_service_account.email}"
+  depends_on = [google_service_account.vm_service_account, null_resource.api_readiness_check]
+}
+
+resource "google_project_iam_member" "vm_service_account_bigquery_data_editor" {
+  project    = var.project_id
+  role       = "roles/bigquery.dataEditor"
+  member     = "serviceAccount:${google_service_account.vm_service_account.email}"
+  depends_on = [google_service_account.vm_service_account, null_resource.api_readiness_check]
+}
+
+resource "google_project_iam_member" "vm_service_account_bigquery_job_user" {
+  project    = var.project_id
+  role       = "roles/bigquery.jobUser"
+  member     = "serviceAccount:${google_service_account.vm_service_account.email}"
+  depends_on = [google_service_account.vm_service_account, null_resource.api_readiness_check]
+}
+{% endif %}
+
 # Define a Google Compute Engine instance
 resource "google_compute_instance" "mlflow_vm" {
   name         = "{{ flags.mlflow_params.vm_name }}"
@@ -254,6 +312,8 @@ locals {
   # Use SQLite for default backend
   backend_store_uri = "sqlite:///mlflow.db"
   {% endif %}
+
+
 
   default_startup_script = <<-EOF
     #!/bin/bash
@@ -383,10 +443,37 @@ services:
     networks:
       - mlflow-network
     restart: unless-stopped
+{% if flags.needs_feast %}
+
+  feast:
+    build:
+      context: ./feast
+      dockerfile: Dockerfile
+    container_name: feast-server
+    ports:
+      - "{{ flags.feast_params.get('feast_port', 6566) }}:6566"
+    environment:
+      - FEAST_REGISTRY_TYPE=file
+      - FEAST_REGISTRY_PATH=data/registry.db
+      - FEAST_ONLINE_STORE_TYPE={{ flags.feast_params.get('online_store_type', 'sqlite') }}
+      - FEAST_OFFLINE_STORE_TYPE={{ flags.feast_params.get('offline_store_type', 'bigquery') }}
+      - FEAST_OFFLINE_STORE_PROJECT={{ project_id }}
+      - FEAST_OFFLINE_STORE_DATASET={{ flags.feast_params.get('bigquery_dataset', 'feast_offline_store') }}
+      - GOOGLE_CLOUD_PROJECT={{ project_id }}
+    volumes:
+      - feast-data:/app/feast-data
+      - feast-config:/app/feast-config
+    networks:
+      - mlflow-network
+    restart: unless-stopped
+    entrypoint: ["/entrypoint.sh"]
+{% endif %}
 
 volumes:
   mlflow-data:
-  mlflow-config:
+  mlflow-config:{% if flags.needs_feast %}
+  feast-data:
+  feast-config:{% endif %}
 
 networks:
   mlflow-network:
@@ -491,6 +578,203 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
 # Default command
 CMD ["uvicorn", "fastapi-app.main:app", "--host", "0.0.0.0", "--port", "8000"]
 FASTAPI_DOCKERFILE_EOF
+
+{% if flags.needs_feast %}
+    # Create Feast Dockerfile
+    echo "Creating Feast Dockerfile..."
+    mkdir -p /home/$CURRENT_USER/deployml/docker/feast
+    cat > /home/$CURRENT_USER/deployml/docker/feast/Dockerfile << 'FEAST_DOCKERFILE_EOF'
+FROM python:3.9-slim
+
+# Set working directory
+WORKDIR /app
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    curl \
+    git \
+    gcc \
+    netcat-openbsd \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Python dependencies
+RUN pip install --upgrade pip setuptools wheel
+
+# Install Feast and dependencies
+RUN pip install \
+    feast[gcp] \
+    pandas \
+    numpy \
+    pyarrow \
+    google-cloud-bigquery \
+    google-cloud-storage \
+    psycopg2-binary
+
+# Create directories
+RUN mkdir -p /app/feast-data /app/feast-config /app/feature_repo
+
+# Copy feature repository
+COPY feature_repo/ /app/feature_repo/
+
+# Set environment variables
+ENV PYTHONPATH=/app
+ENV FEAST_REPO_PATH=/app/feature_repo
+ENV GOOGLE_APPLICATION_CREDENTIALS=/tmp/gcp-service-account.json
+
+# Copy entrypoint script
+COPY entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
+# Expose port
+EXPOSE 6566
+
+# Health check (Feast doesn't have /health endpoint, check port)
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
+    CMD curl -f http://localhost:6566/ui || nc -z localhost 6566 || exit 1
+
+# Use entrypoint script as default
+ENTRYPOINT ["/entrypoint.sh"]
+FEAST_DOCKERFILE_EOF
+
+    # Create Feast entrypoint script
+    cat > /home/$CURRENT_USER/deployml/docker/feast/entrypoint.sh << 'FEAST_ENTRYPOINT_EOF'
+#!/bin/bash
+set -e
+
+echo "🍽️ Starting Feast container..."
+
+# Use VM's default service account for GCP authentication
+# The VM already has the necessary BigQuery and Storage permissions
+echo "🔑 Using VM service account for GCP authentication"
+
+# Navigate to feature repo
+cd /app/feature_repo
+
+# Copy feature store configuration if template exists
+if [ -f feature_store.yaml.template ]; then
+    echo "📝 Configuring feature store..."
+    cp feature_store.yaml.template feature_store.yaml
+    echo "✅ Feature store configuration updated"
+fi
+
+# Display current configuration
+echo "📋 Current feature store configuration:"
+cat feature_store.yaml
+
+# Apply feature definitions to registry
+echo "🚀 Applying feature definitions..."
+feast apply
+
+# Start Feast server
+echo "🌐 Starting Feast server on 0.0.0.0:6566..."
+exec feast serve --host 0.0.0.0 --port 6566
+FEAST_ENTRYPOINT_EOF
+
+    # Create Feast feature repository
+    echo "Creating Feast feature repository..."
+    mkdir -p /home/$CURRENT_USER/deployml/docker/feast/feature_repo
+    
+    # Create feature_store.yaml template
+    cat > /home/$CURRENT_USER/deployml/docker/feast/feature_repo/feature_store.yaml.template << 'FEAST_CONFIG_EOF'
+project: {{ project_id | replace('-', '_') }}
+project_id: {{ project_id | replace('-', '_') }}
+registry: data/registry.db
+provider: gcp
+online_store:
+  type: {{ flags.feast_params.get('online_store_type', 'sqlite') }}
+{% if flags.feast_params.get('online_store_type', 'sqlite') == 'sqlite' %}
+  path: data/online_store.db
+{% elif flags.feast_params.get('online_store_type') == 'datastore' %}
+  project_id: {{ project_id }}
+  namespace: {{ project_id | replace('-', '_') }}_online
+{% elif flags.feast_params.get('online_store_type') == 'bigtable' %}
+  project_id: {{ project_id }}
+  instance: {{ project_id }}-bt-instance
+{% endif %}
+offline_store:
+  type: {{ flags.feast_params.get('offline_store_type', 'bigquery') }}
+{% if flags.feast_params.get('offline_store_type', 'bigquery') == 'bigquery' %}
+  project_id: {{ project_id }}
+  dataset: {{ flags.feast_params.get('bigquery_dataset', 'feast_offline_store') }}
+{% endif %}
+entity_key_serialization_version: 3
+FEAST_CONFIG_EOF
+
+    # Create example feature definitions (based on square_duckling)
+    cat > /home/$CURRENT_USER/deployml/docker/feast/feature_repo/example_features.py << 'FEAST_FEATURES_EOF'
+from datetime import timedelta
+import pandas as pd
+from feast import (
+    BigQuerySource,
+    Entity,
+    FeatureService,
+    FeatureView,
+    Field,
+    RequestSource,
+)
+from feast.on_demand_feature_view import on_demand_feature_view
+from feast.types import Float32, Int64
+
+# Define an entity for the driver
+driver = Entity(name="driver", join_keys=["driver_id"])
+
+# Define a data source from BigQuery
+driver_stats_source = BigQuerySource(
+    name="driver_hourly_stats_source",
+    table="{{ project_id }}.{{ flags.feast_params.get('bigquery_dataset', 'feast_offline_store') }}.driver_hourly_stats",
+    timestamp_field="event_timestamp",
+    created_timestamp_column="created",
+)
+
+# Feature views group features based on how they're stored
+driver_stats_fv = FeatureView(
+    name="driver_hourly_stats",
+    entities=[driver],
+    ttl=timedelta(weeks=52),
+    schema=[
+        Field(name="conv_rate", dtype=Float32),
+        Field(name="acc_rate", dtype=Float32),
+        Field(name="avg_daily_trips", dtype=Int64),
+    ],
+    source=driver_stats_source,
+    tags={"team": "driver_performance"},
+)
+
+# Define a request data source for real-time features
+input_request = RequestSource(
+    name="vals_to_add",
+    schema=[
+        Field(name="val_to_add", dtype=Int64),
+        Field(name="val_to_add_2", dtype=Int64),
+    ],
+)
+
+# On-demand feature view for real-time transformations
+@on_demand_feature_view(
+    sources=[driver_stats_fv, input_request],
+    schema=[
+        Field(name="conv_rate_plus_val1", dtype=Float32),
+        Field(name="conv_rate_plus_val2", dtype=Float32),
+    ],
+)
+def transformed_conv_rate(inputs: pd.DataFrame) -> pd.DataFrame:
+    df = pd.DataFrame()
+    df["conv_rate_plus_val1"] = inputs["conv_rate"] + inputs["val_to_add"]
+    df["conv_rate_plus_val2"] = inputs["conv_rate"] + inputs["val_to_add_2"]
+    return df
+
+# Feature service for model serving
+driver_activity_v1 = FeatureService(
+    name="driver_activity_v1",
+    features=[
+        driver_stats_fv[["conv_rate"]],
+        transformed_conv_rate,
+    ],
+    )
+FEAST_FEATURES_EOF
+
+
+{% endif %}
 
     # Setup FastAPI application
     echo "Setting up FastAPI application..."
@@ -1104,12 +1388,13 @@ ENV_EOF
     
     # Get external IP for display
     EXTERNAL_IP=$(curl -s http://metadata.google.internal/computeMetadata/v1/instance/network-interfaces/0/access-configs/0/external-ip -H "Metadata-Flavor: Google")
-    echo "🐳 Containerized MLflow deployment{{ ' with PostgreSQL backend' if flags.needs_postgres else '' }} completed successfully!"
+    echo "🐳 Containerized deployment{{ ' with PostgreSQL backend' if flags.needs_postgres else '' }} completed successfully!"
     echo "🌐 MLflow UI will be available at: http://$EXTERNAL_IP:{{ flags.mlflow_params.mlflow_port }}"
     echo "🚀 FastAPI Proxy will be available at: http://$EXTERNAL_IP:{{ flags.mlflow_params.get('fastapi_port', 8000) }}"
     echo "📊 Container Info: http://$EXTERNAL_IP:{{ flags.mlflow_params.get('fastapi_port', 8000) }}/container-info"
+    {% if flags.needs_feast %}echo "🍽️ Feast Feature Server will be available at: http://$EXTERNAL_IP:{{ flags.feast_params.get('feast_port', 6566) }}"{% endif %}
     echo "🔧 SSH into the VM with: gcloud compute ssh {{ flags.mlflow_params.vm_name }} --zone={{ zone }}"
-    echo "🐳 Manage containers: docker ps, docker logs mlflow-server, docker logs fastapi-proxy"
+    echo "🐳 Manage containers: docker ps, docker logs mlflow-server, docker logs fastapi-proxy{% if flags.needs_feast %}, docker logs feast-server{% endif %}"
     echo "🔧 Docker Compose: docker compose up -d, docker compose down, docker compose restart"
     echo "Backend store: {{ 'PostgreSQL' if flags.needs_postgres else 'SQLite' }}"
     {% if flags.mlflow_params.get('artifact_bucket') %}
@@ -1153,6 +1438,24 @@ resource "google_compute_firewall" "allow_fastapi" {
   source_ranges = ["0.0.0.0/0"]
   target_tags   = ["mlflow-server"]
 }
+
+{% if flags.needs_feast %}
+# Firewall rule to allow Feast server traffic
+resource "google_compute_firewall" "allow_feast" {
+  name    = "allow-feast"
+  network = "default"
+  
+  # Explicit dependency to ensure APIs are ready FIRST
+  depends_on = [null_resource.api_readiness_check]
+  
+  allow {
+    protocol = "tcp"
+    ports    = ["{{ flags.feast_params.get('feast_port', 6566) }}"]
+  }
+  source_ranges = ["0.0.0.0/0"]
+  target_tags   = ["mlflow-server"]
+}
+{% endif %}
 
 # Firewall rules for HTTP/HTTPS (if needed)
 {% if flags.mlflow_params.get("allow_public_access", false) %}
@@ -1212,11 +1515,22 @@ output "container_info_url" {
   value = "http://${google_compute_instance.mlflow_vm.network_interface[0].access_config[0].nat_ip}:{{ flags.mlflow_params.get('fastapi_port', 8000) }}/container-info"
 }
 
+{% if flags.needs_feast %}
+output "feast_url" {
+  value = "http://${google_compute_instance.mlflow_vm.network_interface[0].access_config[0].nat_ip}:{{ flags.feast_params.get('feast_port', 6566) }}"
+}
+
+output "feast_ui_url" {
+  value = "http://${google_compute_instance.mlflow_vm.network_interface[0].access_config[0].nat_ip}:{{ flags.feast_params.get('feast_port', 6566) }}/ui"
+}
+{% endif %}
+
 output "docker_commands" {
   value = {
     check_containers = "docker ps"
     mlflow_logs      = "docker logs mlflow-server"
-    fastapi_logs     = "docker logs fastapi-proxy"
+    fastapi_logs     = "docker logs fastapi-proxy"{% if flags.needs_feast %}
+    feast_logs       = "docker logs feast-server"{% endif %}
     restart_services = "docker compose restart"
     stop_services    = "docker compose down"
     start_services   = "docker compose up -d"
