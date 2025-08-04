@@ -73,12 +73,37 @@ resource "google_cloud_run_service" "feast" {
         
         env {
           name  = "FEAST_OFFLINE_STORE_TYPE"
-          value = "file"
+          value = var.offline_store
         }
         
         env {
           name  = "FEAST_ARTIFACT_BUCKET"
           value = var.artifact_bucket
+        }
+        
+        env {
+          name  = "FEAST_BIGQUERY_PROJECT"
+          value = var.bigquery_project != "" ? var.bigquery_project : var.project_id
+        }
+        
+        env {
+          name  = "FEAST_BIGQUERY_DATASET"
+          value = var.bigquery_dataset
+        }
+        
+        env {
+          name  = "GOOGLE_CLOUD_PROJECT"
+          value = var.bigquery_project != "" ? var.bigquery_project : var.project_id
+        }
+        
+        env {
+          name  = "FEAST_OFFLINE_STORE_DATASET"
+          value = var.bigquery_dataset
+        }
+        
+        env {
+          name  = "FEAST_OFFLINE_STORE_PROJECT_ID"
+          value = var.bigquery_project != "" ? var.bigquery_project : var.project_id
         }
         
         resources {
@@ -186,21 +211,3 @@ resource "google_storage_bucket_iam_member" "feast_artifact_access" {
   member = "serviceAccount:${data.google_project.current.number}-compute@developer.gserviceaccount.com"
 }
 
-resource "google_bigquery_dataset" "feast_dataset" {
-  count       = var.create_bigquery_dataset ? 1 : 0
-  dataset_id  = var.bigquery_dataset
-  project     = var.project_id
-  location    = var.region
-  
-  description = "Feast offline store dataset"
-  
-  labels = {
-    component  = "feast-offline-store"
-    managed-by = "terraform"
-  }
-  
-  lifecycle {
-    ignore_changes = [dataset_id]
-    prevent_destroy = true
-  }
-}

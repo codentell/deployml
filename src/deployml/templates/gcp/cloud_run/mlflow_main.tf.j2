@@ -46,16 +46,6 @@ module "cloud_sql_postgres" {
   db_user         = "mlflow"
 }
 
-# Create separate feast database in the same PostgreSQL instance
-# resource "google_sql_database" "feast_db" {
-#   name     = "feast"
-#   instance = module.cloud_sql_postgres.instance_name
-#   depends_on = [module.cloud_sql_postgres]
-  
-#   lifecycle {
-#     ignore_changes = [name]
-#   }
-# }
 
 {% endif %}
 {% endblock %}
@@ -175,8 +165,6 @@ module "{{ stage_name }}_{{ tool.name }}" {
   memory_limit        = var.memory_limit
   allow_public_access = var.allow_public_access
   create_service      = true
-  bigquery_dataset    = var.feast_bigquery_dataset
-  create_bigquery_dataset = var.feast_create_bigquery_dataset
   artifact_bucket     = {% if create_artifact_bucket %}google_storage_bucket.artifact_tracking_mlflow_artifact.name{% else %}var.artifact_bucket{% endif %}
   {% if flags.needs_postgres %}
   backend_store_uri   = module.cloud_sql_postgres.feast_connection_string_cloud_sql
@@ -197,6 +185,9 @@ module "{{ stage_name }}_{{ tool.name }}" {
   postgres_user       = ""
   postgres_password   = ""
   {% endif %}
+  offline_store       = "{{ tool.params.get('offline_store', 'file') }}"
+  bigquery_project    = "{{ tool.params.get('bigquery_project', '') }}"
+  bigquery_dataset    = "{{ tool.params.get('bigquery_dataset', 'feast_offline_store') }}"
 }
     {% endif %}
   {% endfor %}
