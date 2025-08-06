@@ -72,3 +72,22 @@ variable "feast_port" {
   description = "Port for Feast server"
   default     = 6566
 }
+
+# --- FEAST Database Configuration ---
+variable "feast_database_name" {
+  type        = string
+  description = "Name of the FEAST database"
+  default     = "feast"
+}
+
+variable "feast_database_user" {
+  type        = string
+  description = "Name of the FEAST database user"
+  default     = "feast"
+}
+
+variable "feast_separate_database" {
+  type        = bool
+  description = "Whether to use a separate database for FEAST"
+  default     = true
+}

@@ -11,7 +11,7 @@ enable_{{ stage_name }}_{{ tool.name }} = true
 
 # Dynamic parameter assignment from YAML config
 {%- set defined = [
-  "project_id", "region", "zone", "create_service", "create_bucket", "service_name", "vm_name", "machine_type", "disk_size_gb", "disk_type", "image_family", "artifact_bucket", "backend_store_uri", "image", "allow_public_access", "mlflow_port", "fastapi_port", "fastapi_app_source", "enable_https", "service_account_email", "network", "subnetwork", "allow_http_https", "use_postgres", "cloudsql_instance_annotation", "tags", "metadata", "startup_script", "feast_port", "registry_type", "online_store_type", "offline_store_type", "bigquery_dataset", "create_bigquery_dataset", "sample_data"
+  "project_id", "region", "zone", "create_service", "create_bucket", "service_name", "vm_name", "machine_type", "disk_size_gb", "disk_type", "image_family", "artifact_bucket", "backend_store_uri", "image", "allow_public_access", "mlflow_port", "fastapi_port", "fastapi_app_source", "enable_https", "service_account_email", "network", "subnetwork", "allow_http_https", "use_postgres", "cloudsql_instance_annotation", "tags", "metadata", "startup_script", "feast_port", "registry_type", "online_store_type", "offline_store_type", "bigquery_dataset", "create_bigquery_dataset", "sample_data", "feast_database_name", "feast_database_user", "feast_separate_database"
 ] -%}
 {%- set seen = [] -%}
 {% for stage in stack %}
@@ -131,4 +131,13 @@ metadata = {}
 {% endif %}
 {% if "startup_script" not in seen %}
 startup_script = ""
+{% endif %}
+{% if "feast_database_name" not in seen %}
+feast_database_name = "feast"
+{% endif %}
+{% if "feast_database_user" not in seen %}
+feast_database_user = "feast"
+{% endif %}
+{% if "feast_separate_database" not in seen %}
+feast_separate_database = true
 {% endif %}

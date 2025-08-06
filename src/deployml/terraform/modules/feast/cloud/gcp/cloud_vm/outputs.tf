@@ -39,3 +39,16 @@ output "feast_environment_file" {
 output "feast_port" {
   value = var.feast_port
 }
+
+output "feast_database_info" {
+  description = "FEAST database configuration information"
+  value = {
+    database_name = var.feast_database_name
+    database_user = var.feast_database_user
+    separate_database = var.feast_separate_database
+    postgres_host = var.postgres_host
+    postgres_database = var.postgres_database
+    postgres_user = var.postgres_user
+    use_postgres = var.use_postgres
+  }
+}

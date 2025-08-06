@@ -1,3 +1,56 @@
+# VM Deployment Template with FEAST Support
+# ===========================================
+# 
+# Features:
+# - Separate FEAST database and user for isolation
+# - Cross-database permissions for MLflow and FEAST users
+# - Enhanced health checks and dependencies
+# - Comprehensive error handling and validation
+# - Proper environment variable management
+# 
+# Key Variables:
+# ==============
+# - feast_database_name: Name of FEAST database (default: "feast")
+# - feast_database_user: Name of FEAST database user (default: "feast")
+# - feast_separate_database: Use separate database for FEAST (default: true)
+# - feast_port: FEAST server port (default: 6566)
+# - bigquery_dataset: BigQuery dataset for offline store (default: "feast_offline_store")
+# - use_postgres: Enable PostgreSQL backend (default: false)
+# 
+# Database Configuration:
+# ======================
+# When feast_separate_database = true:
+# - MLflow database: {first_tool_name} (e.g., "mlflow")
+# - MLflow user: {first_tool_name} (e.g., "mlflow")
+# - FEAST database: feast_database_name (default: "feast")
+# - FEAST user: feast_database_user (default: "feast")
+# 
+# Cross-Database Permissions:
+# ==========================
+# - MLflow user gets full access to FEAST database
+# - FEAST user gets read access to MLflow database
+# - Both users share the same password for simplicity
+# 
+# Environment Variables:
+# ====================
+# - FEAST_REGISTRY_TYPE: "sql" (PostgreSQL) or "file" (SQLite)
+# - FEAST_REGISTRY_PATH: PostgreSQL connection string or file path
+# - FEAST_ONLINE_STORE_TYPE: "postgres" or "sqlite"
+# - FEAST_OFFLINE_STORE_TYPE: "bigquery"
+# - GOOGLE_CLOUD_PROJECT: GCP project ID
+# 
+# Health Checks:
+# =============
+# - MLflow: HTTP health check on /health endpoint
+# - FastAPI: HTTP health check on /health endpoint  
+# - FEAST: Port check using nc (netcat)
+# 
+# Dependencies:
+# ============
+# - FEAST depends on MLflow being healthy
+# - FastAPI depends on MLflow being healthy
+# - All services depend on PostgreSQL being ready
+
 {% if create_artifact_bucket %}
 {% for stage in stack %}
   {% for stage_name, tool in stage.items() %}
@@ -134,7 +187,7 @@ resource "google_sql_database_instance" "postgres" {
   deletion_protection = false
 }
 
-# Database within the instance
+# Database within the instance for MLflow
 resource "google_sql_database" "db" {
   name     = "{{ flags.first_tool_name }}"
   instance = google_sql_database_instance.postgres.name
@@ -142,7 +195,17 @@ resource "google_sql_database" "db" {
   depends_on = [google_sql_database_instance.postgres]
 }
 
-# Database user
+{% if flags.needs_feast %}
+# Separate database for FEAST
+resource "google_sql_database" "feast_db" {
+  name     = var.feast_database_name
+  instance = google_sql_database_instance.postgres.name
+  project  = var.project_id
+  depends_on = [google_sql_database_instance.postgres]
+}
+{% endif %}
+
+# Database user for MLflow
 resource "google_sql_user" "users" {
   name     = "{{ flags.first_tool_name }}"
   instance = google_sql_database_instance.postgres.name
@@ -150,6 +213,17 @@ resource "google_sql_user" "users" {
   project  = var.project_id
   depends_on = [google_sql_database_instance.postgres]
 }
+
+{% if flags.needs_feast %}
+# Separate database user for FEAST
+resource "google_sql_user" "feast_user" {
+  name     = var.feast_database_user
+  instance = google_sql_database_instance.postgres.name
+  password = random_password.db_password.result
+  project  = var.project_id
+  depends_on = [google_sql_database_instance.postgres]
+}
+{% endif %}
 
 # Note: If terraform destroy fails with "role cann       ot be dropped because some objects depend on it",
 # this is because MLflow created tables/objects owned by the user. To fix:
@@ -308,8 +382,23 @@ locals {
   # Use PostgreSQL connection string from the direct resources
   postgres_connection_string = "postgresql+psycopg2://${google_sql_user.users.name}:${random_password.db_password.result}@${google_sql_database_instance.postgres.public_ip_address}:5432/${google_sql_database.db.name}"
   backend_store_uri = "postgresql+psycopg2://${google_sql_user.users.name}:${random_password.db_password.result}@${google_sql_database_instance.postgres.public_ip_address}:5432/${google_sql_database.db.name}"
-  # FEAST PostgreSQL configuration
+  {% if flags.needs_feast %}
+  # FEAST PostgreSQL configuration - use separate database and user
+  feast_registry_uri = "postgresql+psycopg2://${google_sql_user.feast_user.name}:${random_password.db_password.result}@${google_sql_database_instance.postgres.public_ip_address}:5432/${google_sql_database.feast_db.name}"
+  feast_postgres_host = google_sql_database_instance.postgres.public_ip_address
+  feast_postgres_port = "5432"
+  feast_postgres_database = google_sql_database.feast_db.name
+  feast_postgres_user = google_sql_user.feast_user.name
+  feast_postgres_password = random_password.db_password.result
+  {% else %}
+  # FEAST PostgreSQL configuration - use same database as MLflow
   feast_registry_uri = "postgresql+psycopg2://${google_sql_user.users.name}:${random_password.db_password.result}@${google_sql_database_instance.postgres.public_ip_address}:5432/${google_sql_database.db.name}"
+  feast_postgres_host = google_sql_database_instance.postgres.public_ip_address
+  feast_postgres_port = "5432"
+  feast_postgres_database = google_sql_database.db.name
+  feast_postgres_user = google_sql_user.users.name
+  feast_postgres_password = random_password.db_password.result
+  {% endif %}
   postgres_host = google_sql_database_instance.postgres.public_ip_address
   postgres_port = "5432"
   postgres_database = google_sql_database.db.name
@@ -406,6 +495,40 @@ locals {
     mkdir -p /home/$CURRENT_USER/deployml/docker/feast
     {% endif %}
 
+    {% if flags.needs_feast and flags.needs_postgres %}
+    # Grant MLflow user access to FEAST database for cross-database operations
+    echo "Setting up database permissions for MLflow and FEAST..."
+    
+    # Wait for PostgreSQL to be ready
+    echo "Waiting for PostgreSQL to be ready for permission setup..."
+    until pg_isready -h {{ '${google_sql_database_instance.postgres.public_ip_address}' }} -p 5432 -U {{ flags.first_tool_name }}; do
+        echo "PostgreSQL not ready yet, waiting..."
+        sleep 5
+    done
+    
+    # Grant MLflow user access to FEAST database
+    echo "Granting MLflow user access to FEAST database..."
+    PGPASSWORD={{ '${random_password.db_password.result}' }} psql -h {{ '${google_sql_database_instance.postgres.public_ip_address}' }} -p 5432 -U {{ flags.first_tool_name }} -d {{ '${var.feast_database_name}' }} -c "
+    GRANT CONNECT ON DATABASE {{ '${var.feast_database_name}' }} TO {{ flags.first_tool_name }};
+    GRANT USAGE ON SCHEMA public TO {{ flags.first_tool_name }};
+    GRANT CREATE ON SCHEMA public TO {{ flags.first_tool_name }};
+    GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO {{ flags.first_tool_name }};
+    GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public TO {{ flags.first_tool_name }};
+    ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO {{ flags.first_tool_name }};
+    ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON SEQUENCES TO {{ flags.first_tool_name }};
+    " || echo "Warning: Could not grant permissions (this may be normal if FEAST database doesn't exist yet)"
+    
+    # Grant FEAST user access to MLflow database (for potential cross-database operations)
+    echo "Granting FEAST user access to MLflow database..."
+    PGPASSWORD={{ '${random_password.db_password.result}' }} psql -h {{ '${google_sql_database_instance.postgres.public_ip_address}' }} -p 5432 -U {{ '${var.feast_database_user}' }} -d {{ flags.first_tool_name }} -c "
+    GRANT CONNECT ON DATABASE {{ flags.first_tool_name }} TO {{ '${var.feast_database_user}' }};
+    GRANT USAGE ON SCHEMA public TO {{ '${var.feast_database_user}' }};
+    GRANT SELECT ON ALL TABLES IN SCHEMA public TO {{ '${var.feast_database_user}' }};
+    " || echo "Warning: Could not grant permissions (this may be normal if MLflow database doesn't exist yet)"
+    
+    echo "Database permissions setup completed"
+    {% endif %}
+
 {% if flags.needs_feast %}
     # Create Feast environment configuration with actual PostgreSQL credentials
     echo "Setting up Feast environment configuration..."
@@ -498,7 +621,14 @@ services:
     restart: unless-stopped
     entrypoint: ["/entrypoint.sh"]
     depends_on:
-      - mlflow
+      mlflow:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "6566"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
 {% endif %}
 
 volumes:
@@ -734,13 +864,33 @@ if [ -f feature_store.yaml.template ]; then
     fi
 fi
 
-# Display current configuration
+# Display current configuration (without sensitive data)
 echo "📋 Current feature store configuration:"
-cat feature_store.yaml
+grep -v "password\|PASSWORD" feature_store.yaml || true
 
-# Apply feature definitions to registry
+# Apply feature definitions to registry with retry logic
 echo "🚀 Applying feature definitions..."
-feast apply
+max_apply_retries=3
+apply_retry_count=0
+
+while [ $apply_retry_count -lt $max_apply_retries ]; do
+    if feast apply; then
+        echo "✅ Feature definitions applied successfully"
+        break
+    else
+        apply_retry_count=$((apply_retry_count + 1))
+        echo "⚠️ Failed to apply feature definitions (attempt $apply_retry_count/$max_apply_retries)"
+        if [ $apply_retry_count -lt $max_apply_retries ]; then
+            echo "⏳ Retrying in 10 seconds..."
+            sleep 10
+        else
+            echo "❌ Failed to apply feature definitions after $max_apply_retries attempts"
+            echo "⚠️ Continuing with FEAST server startup anyway..."
+            echo "💡 You can manually apply feature definitions later using: feast apply"
+            break
+        fi
+    fi
+done
 
 # Start Feast server
 echo "🌐 Starting Feast server on 0.0.0.0:6566..."
@@ -797,7 +947,7 @@ from feast import (
     RequestSource,
 )
 from feast.on_demand_feature_view import on_demand_feature_view
-from feast.types import Float32, Int64
+from feast.types import Float64, Int64
 
 # Define an entity for the customer
 customer = Entity(name="customer", join_keys=["customer_id"])
@@ -817,10 +967,10 @@ sample_sales_fv = FeatureView(
     entities=[customer],
     ttl=timedelta(weeks=52),
     schema=[
-        Field(name="sale_amount", dtype=Float32),
+        Field(name="sale_amount", dtype=Float64),
         Field(name="quantity", dtype=Int64),
-        Field(name="region", dtype=Float32),
-        Field(name="customer_segment", dtype=Float32),
+        Field(name="region", dtype=Float64),
+        Field(name="customer_segment", dtype=Float64),
     ],
     source=sample_sales_source,
     tags={"team": "sales_analytics"},
@@ -839,8 +989,8 @@ input_request = RequestSource(
 @on_demand_feature_view(
     sources=[sample_sales_fv, input_request],
     schema=[
-        Field(name="sale_amount_plus_val1", dtype=Float32),
-        Field(name="sale_amount_plus_val2", dtype=Float32),
+        Field(name="sale_amount_plus_val1", dtype=Float64),
+        Field(name="sale_amount_plus_val2", dtype=Float64),
     ],
 )
 def transformed_sale_amount(inputs: pd.DataFrame) -> pd.DataFrame:
@@ -872,8 +1022,8 @@ driver_stats_fv = FeatureView(
     entities=[customer],  # Using customer entity as fallback
     ttl=timedelta(weeks=52),
     schema=[
-        Field(name="conv_rate", dtype=Float32),
-        Field(name="acc_rate", dtype=Float32),
+        Field(name="conv_rate", dtype=Float64),
+        Field(name="acc_rate", dtype=Float64),
         Field(name="avg_daily_trips", dtype=Int64),
     ],
     source=driver_stats_source,
@@ -893,8 +1043,8 @@ input_request = RequestSource(
 @on_demand_feature_view(
     sources=[driver_stats_fv, input_request],
     schema=[
-        Field(name="conv_rate_plus_val1", dtype=Float32),
-        Field(name="conv_rate_plus_val2", dtype=Float32),
+        Field(name="conv_rate_plus_val1", dtype=Float64),
+        Field(name="conv_rate_plus_val2", dtype=Float64),
     ],
 )
 def transformed_conv_rate(inputs: pd.DataFrame) -> pd.DataFrame:
@@ -1451,11 +1601,11 @@ Environment=MLFLOW_DEFAULT_ARTIFACT_ROOT={% if flags.mlflow_params.get('artifact
 Environment=FEAST_REGISTRY_TYPE=sql
 Environment=FEAST_REGISTRY_PATH=${local.feast_registry_uri}
 Environment=FEAST_ONLINE_STORE_TYPE=postgres
-Environment=FEAST_ONLINE_STORE_HOST=${local.postgres_host}
-Environment=FEAST_ONLINE_STORE_PORT=${local.postgres_port}
-Environment=FEAST_ONLINE_STORE_DATABASE=${local.postgres_database}
-Environment=FEAST_ONLINE_STORE_USER=${local.postgres_user}
-Environment=FEAST_ONLINE_STORE_PASSWORD=${local.postgres_password}
+Environment=FEAST_ONLINE_STORE_HOST=${local.feast_postgres_host}
+Environment=FEAST_ONLINE_STORE_PORT=${local.feast_postgres_port}
+Environment=FEAST_ONLINE_STORE_DATABASE=${local.feast_postgres_database}
+Environment=FEAST_ONLINE_STORE_USER=${local.feast_postgres_user}
+Environment=FEAST_ONLINE_STORE_PASSWORD=${local.feast_postgres_password}
 Environment=FEAST_OFFLINE_STORE_TYPE=bigquery
 Environment=FEAST_OFFLINE_STORE_PROJECT={{ project_id }}
 Environment=FEAST_OFFLINE_STORE_DATASET={{ flags.feast_params.get('bigquery_dataset', 'feast_offline_store') }}
@@ -1490,7 +1640,13 @@ ENV_EOF
     # Build Docker containers first
     echo "Building Docker containers..."
     cd /home/$CURRENT_USER/deployml/docker
-    sudo -u $CURRENT_USER docker compose build
+    if ! sudo -u $CURRENT_USER docker compose build; then
+        echo "❌ Docker build failed. Checking logs..."
+        sudo -u $CURRENT_USER docker compose logs
+        echo "❌ Exiting due to Docker build failure"
+        exit 1
+    fi
+    echo "✅ Docker containers built successfully"
     
     # Reload systemd and enable Docker Compose service
     echo "Enabling Docker Compose service..."
@@ -1546,13 +1702,45 @@ ENV_EOF
       fi
     done
     
+    {% if flags.needs_feast %}
+    # Test FEAST container
+    echo "Testing FEAST container..."
+    for i in {1..20}; do
+      if nc -z localhost {{ flags.feast_params.get('feast_port', 6566) }} 2>/dev/null; then
+        echo "✅ FEAST container is running successfully!"
+        break
+      else
+        echo "Attempt $i: FEAST container not responding yet..."
+        if [ $i -eq 20 ]; then
+          echo "⚠️  FEAST container may still be starting up..."
+          echo "Checking FEAST container logs..."
+          sudo -u $CURRENT_USER docker logs feast-server
+        fi
+        sleep 15
+      fi
+    done
+    
+    # Run FEAST validation script
+    echo "Running FEAST deployment validation..."
+    if sudo -u $CURRENT_USER /home/$CURRENT_USER/deployml/docker/validate_feast.sh; then
+        echo "✅ FEAST deployment validation passed"
+    else
+        echo "⚠️ FEAST deployment validation had issues - check logs for details"
+    fi
+    {% endif %}
+    
     # Get external IP for display
     EXTERNAL_IP=$(curl -s http://metadata.google.internal/computeMetadata/v1/instance/network-interfaces/0/access-configs/0/external-ip -H "Metadata-Flavor: Google")
     echo "🐳 Containerized deployment{{ ' with PostgreSQL backend' if flags.needs_postgres else '' }} completed successfully!"
     echo "🌐 MLflow UI will be available at: http://$EXTERNAL_IP:{{ flags.mlflow_params.mlflow_port }}"
     echo "🚀 FastAPI Proxy will be available at: http://$EXTERNAL_IP:{{ flags.mlflow_params.get('fastapi_port', 8000) }}"
     echo "📊 Container Info: http://$EXTERNAL_IP:{{ flags.mlflow_params.get('fastapi_port', 8000) }}/container-info"
-    {% if flags.needs_feast %}echo "🍽️ Feast Feature Server will be available at: http://$EXTERNAL_IP:{{ flags.feast_params.get('feast_port', 6566) }}"{% endif %}
+    {% if flags.needs_feast %}
+    echo "🍽️ FEAST Feature Server (gRPC/REST API) will be available at: http://$EXTERNAL_IP:{{ flags.feast_params.get('feast_port', 6566) }}"
+    echo "🔍 FEAST Health Check: http://$EXTERNAL_IP:{{ flags.feast_params.get('feast_port', 6566) }}/health"
+    echo "📡 FEAST gRPC Endpoint: $EXTERNAL_IP:{{ flags.feast_params.get('feast_port', 6566) }}"
+    echo "💡 Note: FEAST is a feature store API server, not a web UI. Use gRPC or REST clients to interact with it."
+    {% endif %}
     echo "🔧 SSH into the VM with: gcloud compute ssh {{ flags.mlflow_params.vm_name }} --zone={{ zone }}"
     echo "🐳 Manage containers: docker ps, docker logs mlflow-server, docker logs fastapi-proxy{% if flags.needs_feast %}, docker logs feast-server{% endif %}"
     echo "🔧 Docker Compose: docker compose up -d, docker compose down, docker compose restart"
@@ -1678,10 +1866,40 @@ output "container_info_url" {
 {% if flags.needs_feast %}
 output "feast_url" {
   value = "http://${google_compute_instance.mlflow_vm.network_interface[0].access_config[0].nat_ip}:{{ flags.feast_params.get('feast_port', 6566) }}"
+  description = "FEAST server base URL (gRPC/REST API server)"
+}
+
+output "feast_health_url" {
+  value = "http://${google_compute_instance.mlflow_vm.network_interface[0].access_config[0].nat_ip}:{{ flags.feast_params.get('feast_port', 6566) }}/health"
+  description = "FEAST health check endpoint"
+}
+
+output "feast_grpc_url" {
+  value = "${google_compute_instance.mlflow_vm.network_interface[0].access_config[0].nat_ip}:{{ flags.feast_params.get('feast_port', 6566) }}"
+  description = "FEAST gRPC endpoint (for gRPC clients)"
 }
 
 output "feast_ui_url" {
-  value = "http://${google_compute_instance.mlflow_vm.network_interface[0].access_config[0].nat_ip}:{{ flags.feast_params.get('feast_port', 6566) }}/ui"
+  value = "http://${google_compute_instance.mlflow_vm.network_interface[0].access_config[0].nat_ip}:{{ flags.feast_params.get('feast_port', 6566) }}/health"
+  description = "FEAST health check endpoint (FEAST doesn't have a web UI, it's a gRPC/REST API server)"
+}
+
+output "feast_deployment_info" {
+  value = {
+    container_name = "feast-server"
+    port = {{ flags.feast_params.get('feast_port', 6566) }}
+    database = {% if flags.needs_postgres %}"${local.feast_postgres_database}"{% else %}"sqlite"{% endif %}
+    database_user = {% if flags.needs_postgres %}"${local.feast_postgres_user}"{% else %}"sqlite"{% endif %}
+    database_name_var = var.feast_database_name
+    database_user_var = var.feast_database_user
+    separate_database = var.feast_separate_database
+    registry_type = {% if flags.needs_postgres %}"sql"{% else %}"file"{% endif %}
+    offline_store = "bigquery"
+    offline_dataset = "{{ flags.feast_params.get('bigquery_dataset', 'feast_offline_store') }}"
+    validation_script = "/home/deployml/docker/validate_feast.sh"
+    deployment_type = "vm"
+  }
+  description = "FEAST deployment configuration and information"
 }
 {% endif %}
 
@@ -1751,13 +1969,16 @@ module "{{ stage_name }}_{{ tool.name }}" {
   create_bigquery_dataset = var.create_bigquery_dataset
   artifact_bucket     = {% if create_artifact_bucket %}google_storage_bucket.artifact_tracking_mlflow_artifact.name{% else %}var.artifact_bucket{% endif %}
   feast_port         = var.feast_port
+  feast_database_name = var.feast_database_name
+  feast_database_user = var.feast_database_user
+  feast_separate_database = var.feast_separate_database
   {% if flags.needs_postgres %}
-  backend_store_uri   = "postgresql+psycopg2://${google_sql_user.users.name}:${random_password.db_password.result}@${google_sql_database_instance.postgres.public_ip_address}:5432/${google_sql_database.db.name}"
+  backend_store_uri   = "postgresql+psycopg2://${google_sql_user.feast_user.name}:${random_password.db_password.result}@${google_sql_database_instance.postgres.public_ip_address}:5432/${google_sql_database.feast_db.name}"
   use_postgres        = true
   postgres_host       = google_sql_database_instance.postgres.public_ip_address
   postgres_port       = "5432"
-  postgres_database   = google_sql_database.db.name
-  postgres_user       = google_sql_user.users.name
+  postgres_database   = google_sql_database.feast_db.name
+  postgres_user       = google_sql_user.feast_user.name
   postgres_password   = random_password.db_password.result
   {% else %}
   backend_store_uri   = "{{ tool.params.get('backend_store_uri', 'sqlite:///feast.db') }}"
@@ -1775,6 +1996,10 @@ module "{{ stage_name }}_{{ tool.name }}" {
     google_sql_database_instance.postgres,
     google_sql_database.db,
     google_sql_user.users,
+    {% if flags.needs_feast %}
+    google_sql_database.feast_db,
+    google_sql_user.feast_user,
+    {% endif %}
     {% endif %}
     null_resource.api_readiness_check
   ]

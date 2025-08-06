@@ -215,10 +215,29 @@ variable "sample_data" {
   default     = false
 }
 
+# --- FEAST Database Configuration ---
+variable "feast_database_name" {
+  description = "Name of the FEAST database (defaults to 'feast')"
+  type        = string
+  default     = "feast"
+}
+
+variable "feast_database_user" {
+  description = "Name of the FEAST database user (defaults to 'feast')"
+  type        = string
+  default     = "feast"
+}
+
+variable "feast_separate_database" {
+  description = "Whether to use a separate database for FEAST (recommended for production)"
+  type        = bool
+  default     = true
+}
+
 # --- Dynamic Variables from YAML ---
 # Add any extra YAML params as string variables if not already defined
 {%- set defined = [
-  "project_id", "region", "zone", "create_service", "create_bucket", "service_name", "vm_name", "machine_type", "disk_size_gb", "disk_type", "image_family", "artifact_bucket", "backend_store_uri", "image", "allow_public_access", "mlflow_port", "fastapi_port", "fastapi_app_source", "enable_https", "service_account_email", "network", "subnetwork", "allow_http_https", "use_postgres", "cloudsql_instance_annotation", "tags", "metadata", "startup_script", "feast_port", "registry_type", "online_store_type", "offline_store_type", "bigquery_dataset", "create_bigquery_dataset", "sample_data"
+  "project_id", "region", "zone", "create_service", "create_bucket", "service_name", "vm_name", "machine_type", "disk_size_gb", "disk_type", "image_family", "artifact_bucket", "backend_store_uri", "image", "allow_public_access", "mlflow_port", "fastapi_port", "fastapi_app_source", "enable_https", "service_account_email", "network", "subnetwork", "allow_http_https", "use_postgres", "cloudsql_instance_annotation", "tags", "metadata", "startup_script", "feast_port", "registry_type", "online_store_type", "offline_store_type", "bigquery_dataset", "create_bigquery_dataset", "sample_data", "feast_database_name", "feast_database_user", "feast_separate_database"
 ] -%}
 {%- set seen = [] -%}
 {% for stage in stack %}
