@@ -35,3 +35,21 @@ variable "allow_public_access" {
   description = "Whether to allow public access to the FastAPI service"
   default     = true
 }
+
+variable "metrics_connection_string" {
+  type        = string
+  description = "Connection string for the metrics database"
+  default     = ""
+}
+
+variable "use_metrics_database" {
+  type        = bool
+  description = "Whether to use metrics database for Grafana"
+  default     = false
+}
+
+variable "cloudsql_instance_annotation" {
+  type        = string
+  description = "Cloud SQL instance connection annotation"
+  default     = ""
+}
