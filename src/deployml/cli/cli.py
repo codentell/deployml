@@ -47,7 +47,11 @@ cli = typer.Typer()
 
 
 @cli.command()
-def doctor():
+def doctor(
+    project_id: str = typer.Option(
+        "", "--project-id", "-j", help="GCP Project ID to check APIs (optional)"
+    )
+):
     """
     Run system checks for required tools and authentication for DeployML.
     Also checks if all required GCP APIs are enabled if GCP CLI is installed and authenticated.
@@ -90,11 +94,12 @@ def doctor():
             "\n✅ GCP CLI ☁️  installed and authenticated", fg=typer.colors.GREEN
         )
         # Check enabled GCP APIs
-        project_id = typer.prompt(
-            "Enter your GCP Project ID to check enabled APIs",
-            default="",
-            show_default=False,
-        )
+        if not project_id:
+            project_id = typer.prompt(
+                "Enter your GCP Project ID to check enabled APIs",
+                default="",
+                show_default=False,
+            )
         if project_id:
             typer.echo(
                 f"\n🔎 Checking enabled APIs for project: {project_id} ..."
@@ -303,7 +308,10 @@ def terraform(
 def deploy(
     config_path: Path = typer.Option(
         ..., "--config-path", "-c", help="Path to YAML config file"
-    )
+    ),
+    yes: bool = typer.Option(
+        False, "--yes", "-y", help="Skip confirmation prompts and deploy"
+    ),
 ):
     """
     Deploy infrastructure based on a YAML configuration file.
@@ -407,11 +415,13 @@ def deploy(
             stack.append({"cloud_sql_postgres": {"name": "cloud_sql_postgres", "params": {}}})
             
     typer.echo("📦 Copying module templates...")
-    copy_modules_to_workspace(DEPLOYML_MODULES_DIR, stack, deployment_type)
+    copy_modules_to_workspace(
+        DEPLOYML_MODULES_DIR, stack=stack, deployment_type=deployment_type, cloud=cloud
+    )
 
     # Ensure all stages use Cloud SQL if any stage needs it
     needs_postgres = any(
-        tool.get("params", {}).get("backend_store_uri", "") == "postgresql"
+        tool.get("params", {}).get("backend_store_uri", "").startswith("postgresql")
         for stage in stack
         for tool in stage.values()
     )
@@ -557,7 +567,7 @@ def deploy(
     else:
         confirmation_msg = "🚀 Do you want to deploy the stack?"
 
-    if typer.confirm(confirmation_msg):
+    if yes or typer.confirm(confirmation_msg):
         estimated_time = estimate_terraform_time(result.stdout, "apply")
         typer.echo(f"🏗️ Applying changes... (Estimated time: {estimated_time})")
         # Suppress output of terraform init
@@ -665,6 +675,9 @@ def destroy(
     clean_workspace: bool = typer.Option(
         False, "--clean-workspace", help="Remove entire workspace after destroy"
     ),
+    yes: bool = typer.Option(
+        False, "--yes", "-y", help="Skip confirmation prompts and destroy"
+    ),
 ):
     """
     Destroy infrastructure and optionally clean up workspace and Terraform state files.
@@ -702,7 +715,7 @@ def destroy(
     typer.echo(f"🌐 Project: {project_id}")
     typer.echo("This will permanently delete all resources!")
 
-    if not typer.confirm("Are you sure you want to destroy all resources?"):
+    if not (yes or typer.confirm("Are you sure you want to destroy all resources?")):
         typer.echo("❌ Destroy cancelled")
         return
 
