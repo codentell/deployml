@@ -168,7 +168,7 @@ module "{{ stage_name }}_{{ tool.name }}" {
   memory_limit        = var.memory_limit
   allow_public_access = var.allow_public_access
   {% if flags.needs_postgres %}
-  metrics_connection_string = module.cloud_sql_postgres.metrics_connection_string_cloud_sql
+  metrics_connection_string = module.cloud_sql_postgres.grafana_connection_string_cloud_sql
   use_metrics_database = true
   cloudsql_instance_annotation = module.cloud_sql_postgres.instance_connection_name
   depends_on = [module.cloud_sql_postgres]

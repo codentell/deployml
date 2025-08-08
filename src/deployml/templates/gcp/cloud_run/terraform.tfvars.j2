@@ -36,7 +36,7 @@ backend_store_uri = "{{ backend_uri }}"
 {% for stage in stack %}
   {% for stage_name, tool in stage.items() %}
     {% for key, value in tool.params.items() %}
-      {% if key == "service_name" and stage_name in ["experiment_tracking", "model_serving", "feature_store"] %}
+      {% if key == "service_name" %}
 {{ stage_name }}_{{ tool.name }}_service_name = "{{ value }}"
       {% elif key == "service_name" %}
         {# Do not emit a generic service_name variable for other stages #}

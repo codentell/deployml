@@ -196,6 +196,35 @@ module "{{ stage_name }}_{{ tool.name }}" {
     {% endif %}
   {% endfor %}
 {% endfor %}
+
+# Optional: Grafana monitoring module, only if present in stack
+{% for stage in stack %}
+  {% for stage_name, tool in stage.items() %}
+    {% if stage_name == "model_monitoring" and tool.name == "grafana" %}
+module "{{ stage_name }}_{{ tool.name }}" {
+  source              = "./modules/{{ tool.name }}/cloud/gcp/cloud_run"
+  count               = var.enable_{{ stage_name }}_{{ tool.name }} && var.{{ stage_name }}_{{ tool.name }}_service_name != "" ? 1 : 0
+  project_id          = var.project_id
+  region              = var.region
+  service_name        = var.{{ stage_name }}_{{ tool.name }}_service_name
+  image               = var.{{ stage_name }}_{{ tool.name }}_image
+  cpu_limit           = var.cpu_limit
+  memory_limit        = var.memory_limit
+  allow_public_access = var.allow_public_access
+  {% if flags.needs_postgres %}
+  metrics_connection_string = module.cloud_sql_postgres.grafana_connection_string_cloud_sql
+  use_metrics_database = true
+  cloudsql_instance_annotation = module.cloud_sql_postgres.instance_connection_name
+  depends_on = [module.cloud_sql_postgres]
+  {% else %}
+  metrics_connection_string = ""
+  use_metrics_database = false
+  cloudsql_instance_annotation = ""
+  {% endif %}
+}
+    {% endif %}
+  {% endfor %}
+{% endfor %}
 {% endblock %}
 
 {% block outputs %}
@@ -231,6 +260,17 @@ output "postgresql_credentials" {
   sensitive = true
 }
 {% endif %}
+
+# Output for Grafana if present
+{% for stage in stack %}
+  {% for stage_name, tool in stage.items() %}
+    {% if stage_name == "model_monitoring" and tool.name == "grafana" %}
+output "{{ stage_name }}_{{ tool.name }}_url" {
+  value = length(module.{{ stage_name }}_{{ tool.name }}) > 0 ? module.{{ stage_name }}_{{ tool.name }}[0].service_url : ""
+}
+    {% endif %}
+  {% endfor %}
+{% endfor %}
 
 # Output for FastAPI model serving if present
 {% for stage in stack %}

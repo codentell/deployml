@@ -55,6 +55,12 @@ output "metrics_connection_string_cloud_sql" {
   value = "postgresql+psycopg2://${var.db_user}:${random_password.db_password.result}@/metrics?host=/cloudsql/${google_sql_database_instance.postgres.connection_name}"
 }
 
+# Grafana-friendly connection URL using lib/pq style
+output "grafana_connection_string_cloud_sql" {
+  description = "Postgres connection URL suitable for Grafana using Cloud SQL Unix socket"
+  value = "postgres://${var.db_user}:${random_password.db_password.result}@/metrics?host=/cloudsql/${google_sql_database_instance.postgres.connection_name}&sslmode=disable"
+}
+
 output "postgres_host" {
   value = google_sql_database_instance.postgres.public_ip_address
 }

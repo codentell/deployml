@@ -42,6 +42,12 @@ resource "google_cloud_run_service" "grafana" {
             value = "postgres"
           }
         }
+
+        # Ensure Grafana listens on Cloud Run's port
+        env {
+          name  = "GF_SERVER_HTTP_PORT"
+          value = "8080"
+        }
       }
     }
   }
@@ -59,4 +65,11 @@ resource "google_cloud_run_service_iam_member" "public" {
   service  = google_cloud_run_service.grafana.name
   role     = "roles/run.invoker"
   member   = "allUsers"
+}
+
+# Allow service account to connect to Cloud SQL via socket
+resource "google_project_iam_member" "grafana_cloudsql_client" {
+  project = var.project_id
+  role    = "roles/cloudsql.client"
+  member  = "serviceAccount:${data.google_project.current.number}-compute@developer.gserviceaccount.com"
 }

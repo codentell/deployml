@@ -145,7 +145,7 @@ variable "allow_http_https" {
             "image", "allow_public_access", "auto_approve", "cpu_limit", "memory_limit",
             "cpu_request", "memory_request", "max_scale", "container_concurrency",
             "global_image", "db_type", "db_user", "db_password", "db_name", "db_port",
-            "create_artifact_bucket"
+            "create_artifact_bucket", "service_name"
         ] -%}
 variable "{{ key }}" {
   description = "Parameter {{ key }}"
@@ -168,7 +168,7 @@ variable "{{ stage_name }}_{{ tool.name }}_image" {
 # Control variables for module behavior
 {% for stage in stack %}
   {% for stage_name, tool in stage.items() %}
-    {% if stage_name in ["experiment_tracking", "model_serving", "feature_store"] and 'service_name' in tool.params %}
+    {% if 'service_name' in tool.params %}
 variable "{{ stage_name }}_{{ tool.name }}_service_name" {
   description = "Service name for {{ stage_name }}_{{ tool.name }}"
   type        = string
