@@ -7,9 +7,13 @@ resource "google_cloud_run_service" "fastapi" {
 
   template {
     metadata {
-      annotations = var.use_postgres && var.cloudsql_instance_annotation != "" ? {
+      annotations = merge({
+        "autoscaling.knative.dev/maxScale" = "10"
+        "run.googleapis.com/cpu-throttling" = "false"
+        "run.googleapis.com/execution-environment" = "gen2"
+      }, var.use_postgres && var.cloudsql_instance_annotation != "" ? {
         "run.googleapis.com/cloudsql-instances" = var.cloudsql_instance_annotation
-      } : {}
+      } : {})
     }
     spec {
       service_account_name = "${data.google_project.current.number}-compute@developer.gserviceaccount.com"
@@ -32,12 +36,20 @@ resource "google_cloud_run_service" "fastapi" {
           value = var.use_postgres ? "true" : "false"
         }
         env {
+          name  = "DATABASE_URL"
+          value = var.use_postgres ? (var.db_connection_string != "" ? var.db_connection_string : var.backend_store_uri) : "sqlite:///app.db"
+        }
+        env {
           name  = "FEAST_SERVICE_URL"
           value = var.feast_service_url
         }
         env {
           name  = "ENABLE_FEAST_CONNECTION"
           value = var.enable_feast_connection ? "true" : "false"
+        }
+        env {
+          name  = "GOOGLE_CLOUD_PROJECT"
+          value = var.project_id
         }
         resources {
           limits = {
@@ -47,6 +59,29 @@ resource "google_cloud_run_service" "fastapi" {
         }
         ports {
           container_port = 8080
+        }
+        
+        # Health check
+        liveness_probe {
+          http_get {
+            path = "/health"
+            port = 8080
+          }
+          initial_delay_seconds = 30
+          timeout_seconds = 10
+          period_seconds = 30
+          failure_threshold = 3
+        }
+        
+        startup_probe {
+          http_get {
+            path = "/health"
+            port = 8080
+          }
+          initial_delay_seconds = 10
+          timeout_seconds = 10
+          period_seconds = 10
+          failure_threshold = 10
         }
       }
     }
@@ -92,7 +127,7 @@ resource "google_project_iam_member" "fastapi_cloudsql_client" {
 }
 
 resource "google_storage_bucket_iam_member" "fastapi_mlflow_artifact_access" {
-  count  = var.mlflow_artifact_bucket != "" ? 1 : 0
+  count  = var.mlflow_artifact_bucket != "" && var.mlflow_bucket_exists ? 1 : 0
   bucket = var.mlflow_artifact_bucket
   role   = "roles/storage.objectAdmin"
   member = "serviceAccount:${data.google_project.current.number}-compute@developer.gserviceaccount.com"

@@ -26,6 +26,18 @@ variable "db_user" {
   default     = "mlflow"
 }
 
+variable "db_tier" {
+  type        = string
+  description = "Database tier for Cloud SQL instance"
+  default     = "db-g1-small"
+}
+
+variable "max_connections" {
+  type        = string
+  description = "Maximum number of connections to the database"
+  default     = "100"
+}
+
 variable "gcp_service_list" {
   description = "The list of APIs necessary for MLflow with Cloud SQL"
   type        = list(string)

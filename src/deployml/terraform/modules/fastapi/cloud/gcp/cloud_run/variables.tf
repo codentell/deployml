@@ -59,6 +59,12 @@ variable "backend_store_uri" {
   default     = "sqlite:///mlflow.db"
 }
 
+variable "db_connection_string" {
+  type        = string
+  description = "Database connection string for the application"
+  default     = ""
+}
+
 variable "use_postgres" {
   type        = bool
   description = "Whether to use PostgreSQL backend"
@@ -80,5 +86,11 @@ variable "feast_service_url" {
 variable "enable_feast_connection" {
   type        = bool
   description = "Whether to enable Feast connection"
+  default     = false
+}
+
+variable "mlflow_bucket_exists" {
+  type        = bool
+  description = "Whether the MLflow artifact bucket already exists"
   default     = false
 } 

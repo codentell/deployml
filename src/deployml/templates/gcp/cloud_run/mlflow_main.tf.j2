@@ -46,16 +46,7 @@ module "cloud_sql_postgres" {
   db_user         = "mlflow"
 }
 
-# Create separate feast database in the same PostgreSQL instance
-resource "google_sql_database" "feast_db" {
-  name     = "feast"
-  instance = module.cloud_sql_postgres.instance_name
-  depends_on = [module.cloud_sql_postgres]
-  
-  lifecycle {
-    ignore_changes = [name]
-  }
-}
+
 {% endif %}
 {% endblock %}
 
@@ -133,10 +124,14 @@ module "{{ stage_name }}_{{ tool.name }}" {
   allow_public_access = var.allow_public_access
   {% if flags.needs_postgres %}
   backend_store_uri   = module.cloud_sql_postgres.connection_string
+  # IMPORTANT: Provide a dedicated metrics database connection for the app
+  # so prediction metrics are not written to the MLflow database.
+  db_connection_string = module.cloud_sql_postgres.metrics_connection_string_cloud_sql
   use_postgres        = true
   cloudsql_instance_annotation = module.cloud_sql_postgres.instance_connection_name
   {% else %}
   backend_store_uri   = "{{ tool.params.get('backend_store_uri', 'sqlite:///mlflow.db') }}"
+  db_connection_string = ""
   use_postgres        = false
   cloudsql_instance_annotation = ""
   {% endif %}
@@ -174,8 +169,6 @@ module "{{ stage_name }}_{{ tool.name }}" {
   memory_limit        = var.memory_limit
   allow_public_access = var.allow_public_access
   create_service      = true
-  bigquery_dataset    = var.feast_bigquery_dataset
-  create_bigquery_dataset = var.feast_create_bigquery_dataset
   artifact_bucket     = {% if create_artifact_bucket %}google_storage_bucket.artifact_tracking_mlflow_artifact.name{% else %}var.artifact_bucket{% endif %}
   {% if flags.needs_postgres %}
   backend_store_uri   = module.cloud_sql_postgres.feast_connection_string_cloud_sql
@@ -195,6 +188,38 @@ module "{{ stage_name }}_{{ tool.name }}" {
   postgres_database   = ""
   postgres_user       = ""
   postgres_password   = ""
+  {% endif %}
+  offline_store       = "{{ tool.params.get('offline_store', 'file') }}"
+  bigquery_project    = "{{ tool.params.get('bigquery_project', '') }}"
+  bigquery_dataset    = "{{ tool.params.get('bigquery_dataset', 'feast_offline_store') }}"
+}
+    {% endif %}
+  {% endfor %}
+{% endfor %}
+
+# Optional: Grafana monitoring module, only if present in stack
+{% for stage in stack %}
+  {% for stage_name, tool in stage.items() %}
+    {% if stage_name == "model_monitoring" and tool.name == "grafana" %}
+module "{{ stage_name }}_{{ tool.name }}" {
+  source              = "./modules/{{ tool.name }}/cloud/gcp/cloud_run"
+  count               = var.enable_{{ stage_name }}_{{ tool.name }} && var.{{ stage_name }}_{{ tool.name }}_service_name != "" ? 1 : 0
+  project_id          = var.project_id
+  region              = var.region
+  service_name        = var.{{ stage_name }}_{{ tool.name }}_service_name
+  image               = var.{{ stage_name }}_{{ tool.name }}_image
+  cpu_limit           = var.cpu_limit
+  memory_limit        = var.memory_limit
+  allow_public_access = var.allow_public_access
+  {% if flags.needs_postgres %}
+  metrics_connection_string = module.cloud_sql_postgres.grafana_connection_string_cloud_sql
+  use_metrics_database = true
+  cloudsql_instance_annotation = module.cloud_sql_postgres.instance_connection_name
+  depends_on = [module.cloud_sql_postgres]
+  {% else %}
+  metrics_connection_string = ""
+  use_metrics_database = false
+  cloudsql_instance_annotation = ""
   {% endif %}
 }
     {% endif %}
@@ -235,6 +260,17 @@ output "postgresql_credentials" {
   sensitive = true
 }
 {% endif %}
+
+# Output for Grafana if present
+{% for stage in stack %}
+  {% for stage_name, tool in stage.items() %}
+    {% if stage_name == "model_monitoring" and tool.name == "grafana" %}
+output "{{ stage_name }}_{{ tool.name }}_url" {
+  value = length(module.{{ stage_name }}_{{ tool.name }}) > 0 ? module.{{ stage_name }}_{{ tool.name }}[0].service_url : ""
+}
+    {% endif %}
+  {% endfor %}
+{% endfor %}
 
 # Output for FastAPI model serving if present
 {% for stage in stack %}

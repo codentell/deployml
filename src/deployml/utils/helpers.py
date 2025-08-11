@@ -54,7 +54,10 @@ def check_gcp_auth() -> bool:
 
 
 def copy_modules_to_workspace(
-    modules_dir: Path, stack: list = None, deployment_type: str = None
+    modules_dir: Path,
+    stack: list | None = None,
+    deployment_type: str | None = None,
+    cloud: str = "gcp",
 ) -> None:
     """
     Copy only the required Terraform module templates to the workspace directory.
@@ -63,7 +66,8 @@ def copy_modules_to_workspace(
         modules_dir (Path): The destination directory for module templates.
         stack (list, optional): Stack configuration to determine which modules to copy.
         deployment_type (str, optional): The deployment type (cloud_run, cloud_vm, etc.)
-                                       If None, copies all modules (backward compatibility).
+                                         If None, copies all modules (backward compatibility).
+        cloud (str): Cloud provider key (e.g., 'gcp', 'aws', 'azure'). Defaults to 'gcp'.
     """
     MODULE_TEMPLATES_DIR = TERRAFORM_DIR / "modules"
     if not MODULE_TEMPLATES_DIR.exists():
@@ -108,11 +112,11 @@ def copy_modules_to_workspace(
             # Copy only the specific deployment type if specified
             if deployment_type:
                 deployment_source = (
-                    module_path / "cloud" / "gcp" / deployment_type
+                    module_path / "cloud" / cloud / deployment_type
                 )
                 if deployment_source.exists():
                     deployment_dest = (
-                        dest_module_path / "cloud" / "gcp" / deployment_type
+                        dest_module_path / "cloud" / cloud / deployment_type
                     )
                     deployment_dest.parent.mkdir(parents=True, exist_ok=True)
                     shutil.copytree(deployment_source, deployment_dest)
@@ -243,6 +247,7 @@ def cleanup_cloud_sql_resources(terraform_dir: Path, project_id: str):
     Clean up Cloud SQL database and user before destroying the instance.
     """
     import subprocess
+    import time as _time
 
     try:
         # Get the instance name from terraform state
@@ -253,36 +258,74 @@ def cleanup_cloud_sql_resources(terraform_dir: Path, project_id: str):
             text=True,
         )
         if result.returncode == 0:
-            instance_name = result.stdout.strip()
+            instance_connection_name = result.stdout.strip()
             # Extract instance name from connection name (format: project:region:instance)
-            instance_parts = instance_name.split(":")
-            if len(instance_parts) == 3:
-                instance_name = instance_parts[2]
+            parts = instance_connection_name.split(":")
+            instance_name = parts[2] if len(parts) == 3 else instance_connection_name
 
-                print("🗄️  Cleaning up Cloud SQL database and user...")
+            print("🗄️  Cleaning up Cloud SQL resources (terminate connections, drop DBs, drop users)...")
 
-                # Drop the database first
-                drop_db_cmd = [
-                    "gcloud",
-                    "sql",
-                    "databases",
-                    "delete",
-                    "mlflow",
-                    "--instance",
-                    instance_name,
-                    "--project",
-                    project_id,
-                    "--quiet",
-                ]
-                subprocess.run(drop_db_cmd, capture_output=True, text=True)
+            # Restart instance to terminate all connections (most reliable non-interactive method)
+            restart_cmd = [
+                "gcloud",
+                "sql",
+                "instances",
+                "restart",
+                instance_name,
+                "--project",
+                project_id,
+                "--quiet",
+            ]
+            subprocess.run(restart_cmd, capture_output=True, text=True)
+            _time.sleep(5)
 
-                # Drop the user
+            # List existing databases to avoid failing on non-existent ones
+            list_db_cmd = [
+                "gcloud",
+                "sql",
+                "databases",
+                "list",
+                "--instance",
+                instance_name,
+                "--project",
+                project_id,
+                "--format=value(name)",
+            ]
+            list_proc = subprocess.run(list_db_cmd, capture_output=True, text=True)
+            existing_dbs = set(list_proc.stdout.strip().splitlines()) if list_proc.returncode == 0 else set()
+
+            # Attempt to delete known course DBs if present
+            target_dbs = ["mlflow", "feast", "metrics"]
+            for db_name in target_dbs:
+                if db_name in existing_dbs:
+                    delete_db_cmd = [
+                        "gcloud",
+                        "sql",
+                        "databases",
+                        "delete",
+                        db_name,
+                        "--instance",
+                        instance_name,
+                        "--project",
+                        project_id,
+                        "--quiet",
+                    ]
+                    # Retry a few times in case connections are still draining
+                    for attempt in range(3):
+                        proc = subprocess.run(delete_db_cmd, capture_output=True, text=True)
+                        if proc.returncode == 0:
+                            break
+                        _time.sleep(5)
+
+            # Drop common users after DBs are removed
+            target_users = ["mlflow", "feast", "metrics"]
+            for user in target_users:
                 drop_user_cmd = [
                     "gcloud",
                     "sql",
                     "users",
                     "delete",
-                    "mlflow",
+                    user,
                     "--instance",
                     instance_name,
                     "--project",
@@ -291,7 +334,7 @@ def cleanup_cloud_sql_resources(terraform_dir: Path, project_id: str):
                 ]
                 subprocess.run(drop_user_cmd, capture_output=True, text=True)
 
-                print("✅ Cloud SQL cleanup completed")
+            print("✅ Cloud SQL cleanup completed (best-effort)")
     except Exception as e:
         print(f"⚠️  Cloud SQL cleanup failed (continuing with destroy): {e}")
 

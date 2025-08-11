@@ -12,7 +12,11 @@ resource "google_sql_database_instance" "postgres" {
   depends_on       = [google_project_service.required]
 
   settings {
-    tier = "db-f1-micro"
+    tier = var.db_tier
+    database_flags {
+      name  = "max_connections"
+      value = var.max_connections
+    }
     ip_configuration {
       authorized_networks {
         value = "0.0.0.0/0"
@@ -36,6 +40,21 @@ resource "google_sql_database" "feast_db" {
   instance = google_sql_database_instance.postgres.name
   project  = var.project_id
   depends_on = [google_sql_database_instance.postgres]
+  
+  lifecycle {
+    ignore_changes = [name]
+  }
+}
+
+resource "google_sql_database" "metrics_db" {
+  name     = "metrics"
+  instance = google_sql_database_instance.postgres.name
+  project  = var.project_id
+  depends_on = [google_sql_database_instance.postgres]
+  
+  lifecycle {
+    ignore_changes = [name]
+  }
 }
 
 resource "google_sql_user" "users" {

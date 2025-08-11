@@ -15,7 +15,7 @@ output "service_project" {
 }
 
 output "bigquery_dataset" {
-  value = var.create_bigquery_dataset ? google_bigquery_dataset.feast_dataset[0].dataset_id : var.bigquery_dataset
+  value = var.bigquery_dataset
 }
 
 output "feast_registry_uri" {
@@ -36,7 +36,7 @@ output "feast_online_store_config" {
 output "feast_offline_store_config" {
   value = {
     type    = "bigquery"
-    project = var.project_id
+    project = var.bigquery_project != "" ? var.bigquery_project : var.project_id
     dataset = var.bigquery_dataset
   }
 }

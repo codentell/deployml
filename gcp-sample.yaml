@@ -36,13 +36,16 @@ stack:
         image: gcr.io/mlops-intro-461805/feast/feast:latest
         service_name: feast-server
         backend_store_uri: postgresql
+        offline_store: bigquery
+        bigquery_dataset: mlops-intro-461805.feast_housing.house_data # Optional: defaults to "feast_offline_store"
+
   - model_serving:
       name: fastapi
       params:
         image: gcr.io/mlops-intro-461805/fastapi/fastapi:latest
         service_name: fastapi-mlflow-server
-  # - model_monitoring:
-  #     name: grafana
-  #     params: 
-  #       image: gcr.io/mlops-intro-461805/grafana/grafana:latest
-  #       service_name: grafana-server
+  - model_monitoring:
+      name: grafana
+      params: 
+        image: gcr.io/mlops-intro-461805/grafana/grafana:latest
+        service_name: grafana-server

@@ -73,12 +73,27 @@ resource "google_cloud_run_service" "feast" {
         
         env {
           name  = "FEAST_OFFLINE_STORE_TYPE"
-          value = "bigquery"
+          value = var.offline_store
         }
         
         env {
-          name  = "FEAST_OFFLINE_STORE_PROJECT"
-          value = var.project_id
+          name  = "FEAST_ARTIFACT_BUCKET"
+          value = var.artifact_bucket
+        }
+        
+        env {
+          name  = "FEAST_BIGQUERY_PROJECT"
+          value = var.bigquery_project != "" ? var.bigquery_project : var.project_id
+        }
+        
+        env {
+          name  = "FEAST_BIGQUERY_DATASET"
+          value = var.bigquery_dataset
+        }
+        
+        env {
+          name  = "GOOGLE_CLOUD_PROJECT"
+          value = var.bigquery_project != "" ? var.bigquery_project : var.project_id
         }
         
         env {
@@ -87,8 +102,8 @@ resource "google_cloud_run_service" "feast" {
         }
         
         env {
-          name  = "FEAST_ARTIFACT_BUCKET"
-          value = var.artifact_bucket
+          name  = "FEAST_OFFLINE_STORE_PROJECT_ID"
+          value = var.bigquery_project != "" ? var.bigquery_project : var.project_id
         }
         
         resources {
@@ -102,19 +117,15 @@ resource "google_cloud_run_service" "feast" {
           }
         }
         
-        ports {
-          container_port = 8080
-        }
-        
         startup_probe {
           http_get {
             path = "/health"
             port = 8080
           }
-          initial_delay_seconds = 60
-          timeout_seconds = 5
-          period_seconds = 10
-          failure_threshold = 3
+          failure_threshold     = 20       # Allow 20 failed attempts
+          initial_delay_seconds = 240      # Wait 2 minutes before first check
+          period_seconds        = 30       # Check every 30 seconds
+          timeout_seconds       = 10       # Each check times out after 10 seconds
         }
         
         liveness_probe {
@@ -122,7 +133,7 @@ resource "google_cloud_run_service" "feast" {
             path = "/health"
             port = 8080
           }
-          initial_delay_seconds = 120
+          initial_delay_seconds = 240
           timeout_seconds = 25
           period_seconds = 30
           failure_threshold = 3
@@ -200,20 +211,3 @@ resource "google_storage_bucket_iam_member" "feast_artifact_access" {
   member = "serviceAccount:${data.google_project.current.number}-compute@developer.gserviceaccount.com"
 }
 
-resource "google_bigquery_dataset" "feast_dataset" {
-  count       = var.create_bigquery_dataset ? 1 : 0
-  dataset_id  = var.bigquery_dataset
-  project     = var.project_id
-  location    = var.region
-  
-  description = "Feast offline store dataset"
-  
-  labels = {
-    component  = "feast-offline-store"
-    managed-by = "terraform"
-  }
-  
-  lifecycle {
-    ignore_changes = [dataset_id]
-  }
-}

@@ -60,11 +60,6 @@ variable "bigquery_dataset" {
   default     = "feast_offline_store"
 }
 
-variable "create_bigquery_dataset" {
-  type        = bool
-  description = "Whether to create the BigQuery dataset"
-  default     = true
-}
 
 variable "artifact_bucket" {
   type        = string
@@ -129,4 +124,16 @@ variable "use_postgres" {
   type        = bool
   description = "Whether to use PostgreSQL backend"
   default     = false
+}
+
+variable "offline_store" {
+  type        = string
+  description = "Type of offline store to use (file or bigquery)"
+  default     = "file"
+}
+
+variable "bigquery_project" {
+  type        = string
+  description = "BigQuery project ID for offline store (defaults to main project_id if not specified)"
+  default     = ""
 }
