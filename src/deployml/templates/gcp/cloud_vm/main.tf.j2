@@ -1209,6 +1209,38 @@ async def check_for_model_updates():
             logger.error(f"Error in background model check: {e}")
             await asyncio.sleep(MODEL_CHECK_INTERVAL)
 
+async def save_model_to_registry(model_name: str, model_obj, model_version: str = None) -> bool:
+    """Helper function to save a model to the MLflow registry with fallback methods."""
+    try:
+        # Try to save as pyfunc model first
+        mlflow.pyfunc.log_model(
+            artifact_path="model",
+            python_model=model_obj,
+            registered_model_name=model_name
+        )
+        logger.info(f"✅ Saved model '{model_name}' to MLflow registry as pyfunc")
+        return True
+    except Exception as pyfunc_error:
+        logger.warning(f"Could not save as pyfunc model: {pyfunc_error}")
+        
+        # Try alternative saving methods
+        try:
+            # For scikit-learn models, try sklearn flavor
+            if hasattr(model_obj, 'predict_proba'):
+                mlflow.sklearn.log_model(
+                    model_obj,
+                    artifact_path="model",
+                    registered_model_name=model_name
+                )
+                logger.info(f"✅ Saved model '{model_name}' to MLflow registry as sklearn")
+                return True
+            else:
+                logger.warning("Model type not recognized for MLflow saving")
+                return False
+        except Exception as alt_error:
+            logger.error(f"Failed to save model with alternative method: {alt_error}")
+            return False
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan events"""
@@ -1375,6 +1407,8 @@ async def root():
             <a class="link" href="/mlflow">📊 MLflow UI</a>
             <a class="link" href="/health">🏥 Health Check</a>
             <a class="link" href="/container-info">🐳 Container Info</a>
+            <a class="link" href="/docs#/default/save_model_save_model_post">💾 Save Model to Registry</a>
+            <a class="link" href="/docs#/default/test_data_processing_test_data_processing_post">🧪 Test Data Processing</a>
         </div>
     </body>
     </html>
@@ -1383,7 +1417,7 @@ async def root():
 
 @app.post("/predict")
 async def predict(data: PredictionRequest):
-    """Predict using the loaded MLflow model"""
+    """Predict using the loaded MLflow model and automatically save to MLflow registry if needed"""
     if model is None:
         raise HTTPException(
             status_code=503, 
@@ -1403,11 +1437,60 @@ async def predict(data: PredictionRequest):
         # Make prediction
         predictions = model.predict(input_data)
         
+        # Create MLflow run to log prediction data
+        mlflow_tracking_uri = os.getenv("MLFLOW_TRACKING_URI", MLFLOW_BASE_URL)
+        experiment_name = os.getenv("EXPERIMENT_NAME", "iris_experiment")
+        
+        mlflow.set_tracking_uri(mlflow_tracking_uri)
+        mlflow.set_experiment(experiment_name)
+        
+        with mlflow.start_run(run_name=f"prediction_{datetime.now().strftime('%Y%m%d_%H%M%S')}"):
+            # Log prediction inputs
+            mlflow.log_params({
+                "sepal_length": data.sepal_length,
+                "sepal_width": data.sepal_width,
+                "petal_length": data.petal_length,
+                "petal_width": data.petal_width,
+                "model_name": model_info.get("name", "unknown"),
+                "model_version": model_info.get("version", "unknown"),
+                "deployment": "containerized"
+            })
+            
+            # Log prediction outputs
+            mlflow.log_metrics({
+                "prediction_count": len(predictions),
+                "prediction_values": predictions[0] if len(predictions) > 0 else None
+            })
+            
+            # Save the model if it hasn't been saved before or if it's a new version
+            if model_info.get("name") and model_info.get("status") == "loaded":
+                try:
+                    # Check if model already exists in MLflow
+                    client = mlflow.tracking.MlflowClient()
+                    existing_models = client.search_model_versions(f"name='{model_info['name']}'")
+                    
+                    if not existing_models:
+                        # Model doesn't exist, save it
+                        await save_model_to_registry(model_info["name"], model)
+                    else:
+                        # Check if current version exists
+                        current_version = model_info.get("version", "latest")
+                        version_exists = any(v.version == str(current_version) for v in existing_models)
+                        
+                        if not version_exists:
+                            # Save new version
+                            await save_model_to_registry(model_info["name"], model, current_version)
+                            
+                except Exception as save_error:
+                    logger.warning(f"Could not save model to registry: {save_error}")
+                    # Continue with prediction even if saving fails
+        
         return {
             "predictions": predictions.tolist(),
             "model_info": "MLflow loaded model",
             "input_features": data.dict(),
-            "deployment": "containerized"
+            "deployment": "containerized",
+            "mlflow_run_id": mlflow.active_run().info.run_id if mlflow.active_run() else None
         }
         
     except Exception as e:
@@ -1438,12 +1521,82 @@ async def refresh_model(request: ModelRefreshRequest):
             detail=f"Failed to load model '{request.model_name}': {model_info.get('error', 'Unknown error')}"
         )
 
+@app.post("/save-model")
+async def save_model():
+    """Manually save the currently loaded model to MLflow registry"""
+    if model is None:
+        raise HTTPException(
+            status_code=503,
+            detail="No model loaded. Please load a model first."
+        )
+    
+    if not model_info.get("name"):
+        raise HTTPException(
+            status_code=400,
+            detail="Model name not available. Please refresh the model first."
+        )
+    
+    try:
+        success = await save_model_to_registry(model_info["name"], model, model_info.get("version"))
+        if success:
+            return {
+                "status": "success",
+                "message": f"Model '{model_info['name']}' saved successfully to MLflow registry",
+                "model_info": model_info
+            }
+        else:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to save model '{model_info['name']}' to registry"
+            )
+    except Exception as e:
+        logger.error(f"Error saving model: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error saving model: {str(e)}"
+        )
+
+@app.post("/test-data-processing")
+async def test_data_processing(data: PredictionRequest):
+    """Test endpoint to debug data processing without making predictions"""
+    try:
+        # Convert request to DataFrame
+        input_data = pd.DataFrame([data.dict()])
+        input_data = input_data[
+            ["sepal_length", "sepal_width", "petal_length", "petal_width"]
+        ]
+        
+        # Ensure data types are numeric
+        for col in input_data.columns:
+            input_data[col] = pd.to_numeric(input_data[col], errors='coerce')
+        
+        # Rename columns to match training data
+        input_data.columns = feature_names if feature_names else ["sepal_length", "sepal_width", "petal_length", "petal_width"]
+        
+        return {
+            "input_data_types": input_data.dtypes.to_dict(),
+            "input_data_values": input_data.values.tolist(),
+            "input_data_shape": input_data.shape,
+            "feature_names": feature_names,
+            "model_loaded": model is not None,
+            "model_type": str(type(model)) if model is not None else None
+        }
+    except Exception as e:
+        logger.error(f"Data processing test failed: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Data processing test failed: {str(e)}"
+        )
+
 @app.get("/model-info")
 async def get_model_info():
     """Get current model information"""
     return {
         "model_loaded": model is not None,
         "model_info": model_info,
+        "model_type": str(type(model)) if model is not None else None,
+        "model_has_predict": hasattr(model, 'predict') if model is not None else False,
+        "feature_names": feature_names if feature_names is not None else None,
         "config": {
             "auto_refresh_enabled": AUTO_REFRESH_ENABLED,
             "check_interval_seconds": MODEL_CHECK_INTERVAL,
