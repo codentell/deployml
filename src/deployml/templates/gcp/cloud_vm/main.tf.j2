@@ -1456,11 +1456,14 @@ async def predict(data: PredictionRequest):
                 "deployment": "containerized"
             })
             
-            # Log prediction outputs
-            mlflow.log_metrics({
-                "prediction_count": len(predictions),
-                "prediction_values": predictions[0] if len(predictions) > 0 else None
-            })
+            metrics_payload = {"prediction_count": float(len(predictions))}
+            # Log a numeric first prediction as metric if possible; otherwise, log as param
+            if len(predictions) > 0:
+                try:
+                    metrics_payload["prediction_value_0"] = float(predictions[0])
+                except Exception:
+                    mlflow.log_params({"prediction_value_0": str(predictions[0])})
+            mlflow.log_metrics(metrics_payload)
             
             # Save the model if it hasn't been saved before or if it's a new version
             if model_info.get("name") and model_info.get("status") == "loaded":
