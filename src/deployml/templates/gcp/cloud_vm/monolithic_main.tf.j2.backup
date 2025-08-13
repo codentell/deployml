@@ -1,0 +1,2281 @@
+# VM Deployment Template with FEAST Support
+# ===========================================
+# 
+# Features:
+# - Separate FEAST database and user for isolation
+# - Cross-database permissions for MLflow and FEAST users
+# - Enhanced health checks and dependencies
+# - Comprehensive error handling and validation
+# - Proper environment variable management
+# 
+# Key Variables:
+# ==============
+# - feast_database_name: Name of FEAST database (default: "feast")
+# - feast_database_user: Name of FEAST database user (default: "feast")
+# - feast_separate_database: Use separate database for FEAST (default: true)
+# - feast_port: FEAST server port (default: 6566)
+# - bigquery_dataset: BigQuery dataset for offline store (default: "feast_offline_store")
+# - use_postgres: Enable PostgreSQL backend (default: false)
+# 
+# Database Configuration:
+# ======================
+# When feast_separate_database = true:
+# - MLflow database: {first_tool_name} (e.g., "mlflow")
+# - MLflow user: {first_tool_name} (e.g., "mlflow")
+# - FEAST database: feast_database_name (default: "feast")
+# - FEAST user: feast_database_user (default: "feast")
+# 
+# Cross-Database Permissions:
+# ==========================
+# - MLflow user gets full access to FEAST database
+# - FEAST user gets read access to MLflow database
+# - Both users share the same password for simplicity
+# 
+# Environment Variables:
+# ====================
+# - FEAST_REGISTRY_TYPE: "sql" (PostgreSQL) or "file" (SQLite)
+# - FEAST_REGISTRY_PATH: PostgreSQL connection string or file path
+# - FEAST_ONLINE_STORE_TYPE: "postgres" or "sqlite"
+# - FEAST_OFFLINE_STORE_TYPE: "bigquery"
+# - GOOGLE_CLOUD_PROJECT: GCP project ID
+# 
+# Health Checks:
+# =============
+# - MLflow: HTTP health check on /health endpoint
+# - FastAPI: HTTP health check on /health endpoint  
+# - FEAST: Port check using nc (netcat)
+# 
+# Dependencies:
+# ============
+# - FEAST depends on MLflow being healthy
+# - FastAPI depends on MLflow being healthy
+# - All services depend on PostgreSQL being ready
+
+{% if create_artifact_bucket %}
+{% for stage in stack %}
+  {% for stage_name, tool in stage.items() %}
+    {% if tool.params.get("artifact_bucket") %}
+resource "google_storage_bucket" "{{ stage_name }}_{{ tool.name }}_artifact" {
+  name          = var.artifact_bucket
+  location      = var.region
+  force_destroy = true
+
+  labels = {
+    component  = "{{ tool.name }}-artifacts"
+    managed-by = "terraform"
+    stage      = "{{ stage_name }}"
+  }
+}
+    {% endif %}
+  {% endfor %}
+{% endfor %}
+{% endif %}
+
+provider "google" {
+  project = "{{ project_id }}"
+  region  = "{{ region }}"
+  zone    = "{{ zone }}"
+}
+
+# Detect PostgreSQL and collect service configurations from all stages
+{% set flags = namespace(needs_postgres=false, needs_feast=false, first_tool_name="", mlflow_params={}, feast_params={}) %}
+{% for stage in stack %}
+  {% for stage_name, tool in stage.items() %}
+    {% if tool.name == "mlflow" %}
+      {% for key, value in tool.params.items() %}
+        {% set _ = flags.mlflow_params.update({key: value}) %}
+      {% endfor %}
+      {% if tool.params.get("backend_store_uri", "") == "postgresql" %}
+        {% set flags.needs_postgres = true %}
+        {% if not flags.first_tool_name %}
+          {% set flags.first_tool_name = tool.name %}
+        {% endif %}
+      {% endif %}
+    {% endif %}
+    {% if tool.name == "feast" %}
+      {% set flags.needs_feast = true %}
+      {% for key, value in tool.params.items() %}
+        {% set _ = flags.feast_params.update({key: value}) %}
+      {% endfor %}
+      {% if tool.params.get("backend_store_uri", "") == "postgresql" %}
+        {% set flags.needs_postgres = true %}
+        {% if not flags.first_tool_name %}
+          {% set flags.first_tool_name = tool.name %}
+        {% endif %}
+      {% endif %}
+    {% endif %}
+  {% endfor %}
+{% endfor %}
+
+# Enable required Google Cloud APIs for fresh project
+resource "google_project_service" "required_apis" {
+  for_each = toset([
+    "compute.googleapis.com",                   # Compute Engine (VMs, disks, networks)
+    "storage.googleapis.com",                   # Cloud Storage (artifact buckets)
+    "iam.googleapis.com",                       # Identity and Access Management
+    "iamcredentials.googleapis.com",            # IAM Service Account Credentials
+    "logging.googleapis.com",                   # Cloud Logging
+    "monitoring.googleapis.com",                # Cloud Monitoring
+    "serviceusage.googleapis.com",              # Service Usage (for enabling APIs)
+    "cloudresourcemanager.googleapis.com",     # Cloud Resource Manager (project operations)
+    {% if flags.needs_postgres %}
+    "sqladmin.googleapis.com",                  # Cloud SQL Admin API (for PostgreSQL)
+    "sql-component.googleapis.com",             # Cloud SQL component API
+    "servicenetworking.googleapis.com",         # For private service connections
+    "cloudkms.googleapis.com",                  # For encryption keys (if using CMEK)
+    {% endif %}
+    {% if flags.needs_feast %}
+    "bigquery.googleapis.com",                  # BigQuery API (for Feast offline store)
+    "datastore.googleapis.com",                 # Datastore API (for Feast online store option)
+    "bigtable.googleapis.com",                  # Bigtable API (for Feast online store option)
+    {% endif %}
+  ])
+
+  project = "{{ project_id }}"
+  service = each.value
+
+  # Keep APIs enabled when destroying resources
+  disable_on_destroy = false
+}
+
+# Wait for API propagation (critical for fresh projects)
+resource "time_sleep" "wait_for_api_propagation" {
+  depends_on = [
+    google_project_service.required_apis
+  ]
+
+  create_duration = "120s"  # 2 minutes for API propagation (sufficient for most cases)
+}
+
+# Simple API readiness marker (no external dependencies)
+resource "null_resource" "api_readiness_check" {
+  depends_on = [time_sleep.wait_for_api_propagation]
+  
+  # Simple trigger to ensure proper sequencing
+  triggers = {
+    api_wait_complete = timestamp()
+  }
+}
+
+# Create Cloud SQL PostgreSQL instance if needed
+{% if flags.needs_postgres %}
+# Random password for the database
+resource "random_password" "db_password" {
+  length  = 16
+  special = true
+  override_special = "!#$*+-.=_"
+}
+
+# Cloud SQL PostgreSQL instance
+resource "google_sql_database_instance" "postgres" {
+  name             = "{{ flags.first_tool_name }}-postgres-{{ project_id }}"
+  database_version = "POSTGRES_14"
+  region           = var.region
+  project          = var.project_id
+  depends_on       = [null_resource.api_readiness_check]
+
+  settings {
+    tier = "db-f1-micro"
+    ip_configuration {
+      authorized_networks {
+        value = "0.0.0.0/0"
+      }
+      ipv4_enabled = true
+    }
+  }
+
+  deletion_protection = false
+}
+
+# Database within the instance for MLflow
+resource "google_sql_database" "db" {
+  name     = "{{ flags.first_tool_name }}"
+  instance = google_sql_database_instance.postgres.name
+  project  = var.project_id
+  depends_on = [google_sql_database_instance.postgres]
+}
+
+{% if flags.needs_feast %}
+# Separate database for FEAST
+resource "google_sql_database" "feast_db" {
+  name     = var.feast_database_name
+  instance = google_sql_database_instance.postgres.name
+  project  = var.project_id
+  depends_on = [google_sql_database_instance.postgres]
+}
+{% endif %}
+
+# Database user for MLflow
+resource "google_sql_user" "users" {
+  name     = "{{ flags.first_tool_name }}"
+  instance = google_sql_database_instance.postgres.name
+  password = random_password.db_password.result
+  project  = var.project_id
+  depends_on = [google_sql_database_instance.postgres]
+}
+
+{% if flags.needs_feast %}
+# Separate database user for FEAST
+resource "google_sql_user" "feast_user" {
+  name     = var.feast_database_user
+  instance = google_sql_database_instance.postgres.name
+  password = random_password.db_password.result
+  project  = var.project_id
+  depends_on = [google_sql_database_instance.postgres]
+}
+{% endif %}
+
+# Note: If terraform destroy fails with "role cann       ot be dropped because some objects depend on it",
+# this is because MLflow created tables/objects owned by the user. To fix:
+# 1. Connect to the database: gcloud sql connect {{ flags.first_tool_name }}-postgres-{{ project_id }} --user={{ flags.first_tool_name }}
+# 2. Run: DROP OWNED BY {{ flags.first_tool_name }} CASCADE;
+# 3. Then retry terraform destroy
+{% endif %}
+
+# Storage bucket - only create if explicitly requested
+resource "google_storage_bucket" "artifact" {
+  count         = var.create_bucket && var.artifact_bucket != "" ? 1 : 0
+  name          = var.artifact_bucket
+  location      = var.region
+  force_destroy = true
+  
+  # Explicit dependency to ensure APIs are ready FIRST
+  depends_on = [null_resource.api_readiness_check]
+  
+  labels = {
+    component  = "mlflow-artifacts"
+    managed-by = "terraform"
+  }
+}
+
+# Create a service account for the VM
+resource "google_service_account" "vm_service_account" {
+  account_id   = "mlflow-vm-sa"
+  display_name = "Service Account for MLflow VM"
+  project      = var.project_id
+  
+  # Explicit dependency to ensure APIs are ready FIRST
+  depends_on = [null_resource.api_readiness_check]
+}
+
+# Project-level IAM bindings for the service account (these will show up in the IAM UI)
+{% for stage in stack %}
+  {% for stage_name, tool in stage.items() %}
+    {% if tool.name == "mlflow" and tool.params.get("artifact_bucket") %}
+resource "google_project_iam_member" "vm_service_account_storage_admin" {
+  project    = var.project_id
+  role       = "roles/storage.objectAdmin"
+  member     = "serviceAccount:${google_service_account.vm_service_account.email}"
+  depends_on = [google_service_account.vm_service_account, null_resource.api_readiness_check]
+}
+
+resource "google_project_iam_member" "vm_service_account_storage_viewer" {
+  project    = var.project_id
+  role       = "roles/storage.objectViewer"
+  member     = "serviceAccount:${google_service_account.vm_service_account.email}"
+  depends_on = [google_service_account.vm_service_account, null_resource.api_readiness_check]
+}
+    {% endif %}
+  {% endfor %}
+{% endfor %}
+
+# Additional useful permissions for the VM service account
+resource "google_project_iam_member" "vm_service_account_logging" {
+  project    = var.project_id
+  role       = "roles/logging.logWriter"
+  member     = "serviceAccount:${google_service_account.vm_service_account.email}"
+  depends_on = [google_service_account.vm_service_account, null_resource.api_readiness_check]
+}
+
+resource "google_project_iam_member" "vm_service_account_monitoring" {
+  project    = var.project_id
+  role       = "roles/monitoring.metricWriter"
+  member     = "serviceAccount:${google_service_account.vm_service_account.email}"
+  depends_on = [google_service_account.vm_service_account, null_resource.api_readiness_check]
+}
+
+{% if flags.needs_feast %}
+# BigQuery dataset for Feast offline store
+resource "google_bigquery_dataset" "feast_offline_store" {
+  count       = var.create_bigquery_dataset ? 1 : 0
+  dataset_id  = var.bigquery_dataset
+  project     = var.project_id
+  location    = var.region
+  
+  description = "Feast offline store dataset"
+  
+  labels = {
+    component  = "feast-offline-store"
+    managed-by = "terraform"
+  }
+  
+  depends_on = [null_resource.api_readiness_check]
+}
+
+# BigQuery permissions for Feast
+resource "google_project_iam_member" "vm_service_account_bigquery_user" {
+  project    = var.project_id
+  role       = "roles/bigquery.user"
+  member     = "serviceAccount:${google_service_account.vm_service_account.email}"
+  depends_on = [google_service_account.vm_service_account, null_resource.api_readiness_check]
+}
+
+resource "google_project_iam_member" "vm_service_account_bigquery_data_editor" {
+  project    = var.project_id
+  role       = "roles/bigquery.dataEditor"
+  member     = "serviceAccount:${google_service_account.vm_service_account.email}"
+  depends_on = [google_service_account.vm_service_account, null_resource.api_readiness_check]
+}
+
+resource "google_project_iam_member" "vm_service_account_bigquery_job_user" {
+  project    = var.project_id
+  role       = "roles/bigquery.jobUser"
+  member     = "serviceAccount:${google_service_account.vm_service_account.email}"
+  depends_on = [google_service_account.vm_service_account, null_resource.api_readiness_check]
+}
+{% endif %}
+
+# Define a Google Compute Engine instance
+resource "google_compute_instance" "mlflow_vm" {
+  name         = "{{ flags.mlflow_params.vm_name }}"
+  machine_type = "{{ flags.mlflow_params.machine_type }}"
+  zone         = "{{ zone }}"
+
+  # Explicit dependency to ensure APIs are ready FIRST
+  depends_on = [null_resource.api_readiness_check{% if flags.needs_postgres %}, google_sql_database_instance.postgres, google_sql_database.db, google_sql_user.users{% endif %}]
+
+  boot_disk {
+    initialize_params {
+      image = "debian-cloud/debian-12"
+      size  = {{ flags.mlflow_params.disk_size_gb }}
+      type  = "pd-standard"
+    }
+  }
+
+  network_interface {
+    network = "default"
+    access_config {
+      // Ephemeral public IP
+    }
+  }
+
+  # Service account
+  service_account {
+    email  = google_service_account.vm_service_account.email
+    scopes = ["cloud-platform"] # Grant access to Google Cloud APIs
+  }
+
+  # Startup script to install Docker and deploy MLflow
+  metadata = {
+    startup-script = local.default_startup_script
+  }
+
+  tags = ["mlflow-server"]
+
+  # Allow stopping for update
+  allow_stopping_for_update = true
+}
+
+# Local variables for startup script
+locals {
+  {% if flags.needs_postgres %}
+  # Use PostgreSQL connection string from the direct resources
+  postgres_connection_string = "postgresql+psycopg2://${google_sql_user.users.name}:${random_password.db_password.result}@${google_sql_database_instance.postgres.public_ip_address}:5432/${google_sql_database.db.name}"
+  backend_store_uri = "postgresql+psycopg2://${google_sql_user.users.name}:${random_password.db_password.result}@${google_sql_database_instance.postgres.public_ip_address}:5432/${google_sql_database.db.name}"
+  {% if flags.needs_feast %}
+  # FEAST PostgreSQL configuration - use separate database and user
+  feast_registry_uri = "postgresql+psycopg2://${google_sql_user.feast_user.name}:${random_password.db_password.result}@${google_sql_database_instance.postgres.public_ip_address}:5432/${google_sql_database.feast_db.name}"
+  feast_postgres_host = google_sql_database_instance.postgres.public_ip_address
+  feast_postgres_port = "5432"
+  feast_postgres_database = google_sql_database.feast_db.name
+  feast_postgres_user = google_sql_user.feast_user.name
+  feast_postgres_password = random_password.db_password.result
+  {% else %}
+  # FEAST PostgreSQL configuration - use same database as MLflow
+  feast_registry_uri = "postgresql+psycopg2://${google_sql_user.users.name}:${random_password.db_password.result}@${google_sql_database_instance.postgres.public_ip_address}:5432/${google_sql_database.db.name}"
+  feast_postgres_host = google_sql_database_instance.postgres.public_ip_address
+  feast_postgres_port = "5432"
+  feast_postgres_database = google_sql_database.db.name
+  feast_postgres_user = google_sql_user.users.name
+  feast_postgres_password = random_password.db_password.result
+  {% endif %}
+  postgres_host = google_sql_database_instance.postgres.public_ip_address
+  postgres_port = "5432"
+  postgres_database = google_sql_database.db.name
+  postgres_user = google_sql_user.users.name
+  postgres_password = random_password.db_password.result
+  {% else %}
+  # Use SQLite for default backend
+  backend_store_uri = "sqlite:///mlflow.db"
+  {% endif %}
+
+
+
+  default_startup_script = <<-EOF
+    #!/bin/bash
+    set -e
+    
+    echo "Starting MLflow VM setup{{ ' with PostgreSQL backend' if flags.needs_postgres else '' }}..."
+    
+    # Log all output to a file for debugging
+    exec > >(tee /var/log/mlflow-startup.log) 2>&1
+    
+    echo "$(date): Starting MLflow VM setup..."
+    
+    # Get the current user dynamically
+    CURRENT_USER=$(whoami)
+    echo "Current user: $CURRENT_USER"
+    
+    # Update system packages
+    echo "Updating system packages..."
+    sudo apt-get update -y
+    
+    # Install necessary packages for Docker and Python
+    echo "Installing dependencies..."
+    sudo apt-get install -y \
+      apt-transport-https \
+      ca-certificates \
+      curl \
+      gnupg \
+      lsb-release \
+      software-properties-common \
+      python3 \
+      python3-pip \
+      python3-venv \
+      python3-dev \
+      build-essential \
+      git \
+      wget \
+      unzip{% if flags.needs_postgres %} \
+      postgresql-client{% endif %}
+    
+    # Verify Python and pip are available
+    echo "Verifying Python installation..."
+    python3 --version
+    pip3 --version
+    
+    # Add Docker's official GPG key
+    echo "Adding Docker GPG key..."
+    curl -fsSL https://download.docker.com/linux/debian/gpg | sudo gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg
+    
+    # Set up Docker repository
+    echo "Setting up Docker repository..."
+    echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/debian $(lsb_release -cs) stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+    
+    # Update packages and install Docker
+    echo "Installing Docker..."
+    sudo apt-get update -y
+    sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
+    
+    # Start and enable Docker
+    echo "Starting Docker service..."
+    sudo systemctl enable docker
+    sudo systemctl start docker
+    
+    # Add current user to docker group
+    echo "Configuring Docker permissions for user: $CURRENT_USER"
+    sudo usermod -aG docker $CURRENT_USER
+    
+    # Wait for Docker to be ready
+    echo "Waiting for Docker to be ready..."
+    sleep 10
+    
+    # Test Docker installation
+    echo "Testing Docker installation..."
+    sudo docker run --rm hello-world
+    
+    # Set up containerized MLflow environment
+    echo "Setting up containerized MLflow environment..."
+    
+    # Create deployment directory structure
+    mkdir -p /home/$CURRENT_USER/deployml/docker
+    mkdir -p /home/$CURRENT_USER/deployml/docker/mlflow
+    mkdir -p /home/$CURRENT_USER/deployml/docker/fastapi
+    {% if flags.needs_feast %}
+    mkdir -p /home/$CURRENT_USER/deployml/docker/feast
+    {% endif %}
+
+    {% if flags.needs_feast and flags.needs_postgres %}
+    # Grant MLflow user access to FEAST database for cross-database operations
+    echo "Setting up database permissions for MLflow and FEAST..."
+    
+    # Wait for PostgreSQL to be ready
+    echo "Waiting for PostgreSQL to be ready for permission setup..."
+    until pg_isready -h {{ '${google_sql_database_instance.postgres.public_ip_address}' }} -p 5432 -U {{ flags.first_tool_name }}; do
+        echo "PostgreSQL not ready yet, waiting..."
+        sleep 5
+    done
+    
+    # Grant MLflow user access to FEAST database
+    echo "Granting MLflow user access to FEAST database..."
+    PGPASSWORD={{ '${random_password.db_password.result}' }} psql -h {{ '${google_sql_database_instance.postgres.public_ip_address}' }} -p 5432 -U {{ flags.first_tool_name }} -d {{ '${var.feast_database_name}' }} -c "
+    GRANT CONNECT ON DATABASE {{ '${var.feast_database_name}' }} TO {{ flags.first_tool_name }};
+    GRANT USAGE ON SCHEMA public TO {{ flags.first_tool_name }};
+    GRANT CREATE ON SCHEMA public TO {{ flags.first_tool_name }};
+    GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO {{ flags.first_tool_name }};
+    GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public TO {{ flags.first_tool_name }};
+    ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO {{ flags.first_tool_name }};
+    ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON SEQUENCES TO {{ flags.first_tool_name }};
+    " || echo "Warning: Could not grant permissions (this may be normal if FEAST database doesn't exist yet)"
+    
+    # Grant FEAST user access to MLflow database (for potential cross-database operations)
+    echo "Granting FEAST user access to MLflow database..."
+    PGPASSWORD={{ '${random_password.db_password.result}' }} psql -h {{ '${google_sql_database_instance.postgres.public_ip_address}' }} -p 5432 -U {{ '${var.feast_database_user}' }} -d {{ flags.first_tool_name }} -c "
+    GRANT CONNECT ON DATABASE {{ flags.first_tool_name }} TO {{ '${var.feast_database_user}' }};
+    GRANT USAGE ON SCHEMA public TO {{ '${var.feast_database_user}' }};
+    GRANT SELECT ON ALL TABLES IN SCHEMA public TO {{ '${var.feast_database_user}' }};
+    " || echo "Warning: Could not grant permissions (this may be normal if MLflow database doesn't exist yet)"
+    
+    echo "Database permissions setup completed"
+    {% endif %}
+
+{% if flags.needs_feast %}
+    # Create Feast environment configuration with actual PostgreSQL credentials
+    echo "Setting up Feast environment configuration..."
+    cat > /home/$CURRENT_USER/deployml/docker/feast_environment.env << 'FEAST_ENV_EOF'
+FEAST_REGISTRY_TYPE={{ 'sql' if flags.needs_postgres else 'file' }}
+FEAST_REGISTRY_PATH={{ 'postgresql+psycopg2://' + flags.first_tool_name + ':' + '${random_password.db_password.result}' + '@' + '${google_sql_database_instance.postgres.public_ip_address}' + ':5432/' + '${google_sql_database.db.name}' if flags.needs_postgres else 'data/registry.db' }}
+FEAST_ONLINE_STORE_TYPE={{ 'postgres' if flags.needs_postgres else 'sqlite' }}
+{% if flags.needs_postgres %}
+FEAST_ONLINE_STORE_HOST={{ '${google_sql_database_instance.postgres.public_ip_address}' }}
+FEAST_ONLINE_STORE_PORT=5432
+FEAST_ONLINE_STORE_DATABASE={{ '${google_sql_database.db.name}' }}
+FEAST_ONLINE_STORE_USER={{ flags.first_tool_name }}
+FEAST_ONLINE_STORE_PASSWORD={{ '${random_password.db_password.result}' }}
+{% endif %}
+FEAST_OFFLINE_STORE_TYPE=bigquery
+FEAST_OFFLINE_STORE_PROJECT={{ project_id }}
+FEAST_OFFLINE_STORE_DATASET={{ flags.feast_params.get('bigquery_dataset', 'feast_offline_store') }}
+FEAST_ARTIFACT_BUCKET={{ flags.mlflow_params.get('artifact_bucket', '') }}
+GOOGLE_CLOUD_PROJECT={{ project_id }}
+USE_POSTGRES={{ 'true' if flags.needs_postgres else 'false' }}
+FEAST_PORT={{ flags.feast_params.get('feast_port', 6566) }}
+GOOGLE_APPLICATION_CREDENTIALS=
+FEAST_ENV_EOF
+    chown $CURRENT_USER:$CURRENT_USER /home/$CURRENT_USER/deployml/docker/feast_environment.env
+{% endif %}
+    
+    # Create Docker Compose file
+    echo "Creating Docker Compose configuration..."
+    cat > /home/$CURRENT_USER/deployml/docker/docker-compose.yml << 'DOCKER_COMPOSE_EOF'
+version: '3.8'
+
+services:
+  mlflow:
+    build: 
+      context: ./mlflow
+      dockerfile: Dockerfile
+    container_name: mlflow-server
+    ports:
+      - "{{ flags.mlflow_params.mlflow_port }}:5000"
+    environment:
+      - MLFLOW_BACKEND_STORE_URI=${local.backend_store_uri}
+      - MLFLOW_DEFAULT_ARTIFACT_ROOT={% if flags.mlflow_params.get('artifact_bucket') %}gs://{{ flags.mlflow_params.artifact_bucket }}{% else %}./mlflow-artifacts{% endif %}
+      - MLFLOW_SERVER_HOST=0.0.0.0
+      - MLFLOW_SERVER_PORT=5000
+    volumes:
+      - mlflow-data:/app/mlflow-data
+      - mlflow-config:/app/mlflow-config
+    networks:
+      - mlflow-network
+    restart: unless-stopped
+    command: >
+      mlflow server 
+      --host 0.0.0.0 
+      --port 5000
+      --backend-store-uri ${local.backend_store_uri}
+      --default-artifact-root {% if flags.mlflow_params.get('artifact_bucket') %}gs://{{ flags.mlflow_params.artifact_bucket }}{% else %}./mlflow-artifacts{% endif %}
+    
+  fastapi:
+    build:
+      context: ./fastapi
+      dockerfile: Dockerfile
+    container_name: fastapi-proxy
+    ports:
+      - "{{ flags.mlflow_params.get('fastapi_port', 8000) }}:8000"
+    environment:
+      - MLFLOW_BASE_URL=http://mlflow:5000
+      - MLFLOW_EXTERNAL_URL=$${EXTERNAL_MLFLOW_URL}
+      - FASTAPI_PORT=8000
+    depends_on:
+      - mlflow
+    networks:
+      - mlflow-network
+    restart: unless-stopped
+{% if flags.needs_feast %}
+
+  feast:
+    build:
+      context: ./feast
+      dockerfile: Dockerfile
+    container_name: feast-server
+    ports:
+      - "{{ flags.feast_params.get('feast_port', 6566) }}:6566"
+    env_file:
+      - ./feast_environment.env
+    volumes:
+      - feast-data:/app/feast-data
+      - feast-config:/app/feast-config
+    networks:
+      - mlflow-network
+    restart: unless-stopped
+    entrypoint: ["/entrypoint.sh"]
+    depends_on:
+      mlflow:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "6566"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+{% endif %}
+
+volumes:
+  mlflow-data:
+  mlflow-config:{% if flags.needs_feast %}
+  feast-data:
+  feast-config:{% endif %}
+
+networks:
+  mlflow-network:
+    driver: bridge
+DOCKER_COMPOSE_EOF
+
+    # Create MLflow Dockerfile
+    echo "Creating MLflow Dockerfile..."
+    cat > /home/$CURRENT_USER/deployml/docker/mlflow/Dockerfile << 'MLFLOW_DOCKERFILE_EOF'
+FROM python:3.9-slim
+
+# Set working directory
+WORKDIR /app
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    curl \
+    {% if flags.needs_postgres %}postgresql-client \{% endif %}
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Python dependencies
+RUN pip install --upgrade pip setuptools wheel
+
+# Install MLflow and dependencies
+RUN pip install \
+    mlflow[extras] \
+    sqlalchemy \
+    {% if flags.needs_postgres %}psycopg2-binary \{% endif %}
+    google-cloud-storage \
+    boto3
+
+# Create mlflow user
+RUN useradd -m -s /bin/bash mlflow
+
+# Create directories
+RUN mkdir -p /app/mlflow-data /app/mlflow-config
+RUN chown -R mlflow:mlflow /app
+
+# Switch to mlflow user
+USER mlflow
+
+# Expose MLflow port
+EXPOSE 5000
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
+    CMD curl -f http://localhost:5000/health || exit 1
+
+# Default command
+CMD ["mlflow", "server", "--host", "0.0.0.0", "--port", "5000"]
+MLFLOW_DOCKERFILE_EOF
+
+    # Create FastAPI Dockerfile
+    echo "Creating FastAPI Dockerfile..."
+    cat > /home/$CURRENT_USER/deployml/docker/fastapi/Dockerfile << 'FASTAPI_DOCKERFILE_EOF'
+FROM python:3.9-slim
+
+# Set working directory
+WORKDIR /app
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Python dependencies
+RUN pip install --upgrade pip setuptools wheel
+
+# Install FastAPI and dependencies
+RUN pip install \
+    fastapi \
+    uvicorn \
+    httpx \
+    mlflow \
+    pandas \
+    joblib \
+    scikit-learn \
+    numpy \
+    google-cloud-storage \
+    google-cloud-core
+
+# Create fastapi user
+RUN useradd -m -s /bin/bash fastapi
+
+# Create app directory
+RUN mkdir -p /app/fastapi-app
+RUN chown -R fastapi:fastapi /app
+
+# Copy FastAPI application
+COPY main.py /app/fastapi-app/main.py
+
+# Switch to fastapi user
+USER fastapi
+
+# Expose FastAPI port
+EXPOSE 8000
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
+    CMD curl -f http://localhost:8000/health || exit 1
+
+# Default command
+CMD ["uvicorn", "fastapi-app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+FASTAPI_DOCKERFILE_EOF
+
+{% if flags.needs_feast %}
+    # Create Feast Dockerfile
+    echo "Creating Feast Dockerfile..."
+    mkdir -p /home/$CURRENT_USER/deployml/docker/feast
+    cat > /home/$CURRENT_USER/deployml/docker/feast/Dockerfile << 'FEAST_DOCKERFILE_EOF'
+FROM python:3.9-slim
+
+# Set working directory
+WORKDIR /app
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    curl \
+    git \
+    gcc \
+    netcat-openbsd \
+    gettext \
+    gnupg \
+    postgresql-client \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Google Cloud SDK
+RUN echo "deb [signed-by=/usr/share/keyrings/cloud.google.gpg] https://packages.cloud.google.com/apt cloud-sdk main" | tee -a /etc/apt/sources.list.d/google-cloud-sdk.list && \
+    curl https://packages.cloud.google.com/apt/doc/apt-key.gpg | apt-key --keyring /usr/share/keyrings/cloud.google.gpg add - && \
+    apt-get update && apt-get install -y google-cloud-cli && \
+    rm -rf /var/lib/apt/lists/*
+
+# Install Python dependencies
+RUN pip install --upgrade pip setuptools wheel
+
+# Install Feast and dependencies
+RUN pip install \
+    feast[gcp] \
+    pandas \
+    numpy \
+    pyarrow \
+    google-cloud-bigquery \
+    google-cloud-storage \
+    psycopg2-binary \
+    psycopg[binary] \
+    psycopg-pool
+
+# Create directories
+RUN mkdir -p /app/feast-data /app/feast-config /app/feature_repo
+
+# Copy feature repository
+COPY feature_repo/ /app/feature_repo/
+
+# Set environment variables
+ENV PYTHONPATH=/app
+ENV FEAST_REPO_PATH=/app/feature_repo
+ENV GOOGLE_APPLICATION_CREDENTIALS=/tmp/gcp-service-account.json
+
+# Copy entrypoint script
+COPY entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
+# Expose port
+EXPOSE 6566
+
+# Health check (Feast doesn't have /health endpoint, check if service is responding)
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
+    CMD nc -z localhost 6566 || exit 1
+
+# Use entrypoint script as default
+ENTRYPOINT ["/entrypoint.sh"]
+FEAST_DOCKERFILE_EOF
+
+    # Create Feast entrypoint script
+    cat > /home/$CURRENT_USER/deployml/docker/feast/entrypoint.sh << 'FEAST_ENTRYPOINT_EOF'
+#!/bin/bash
+set -e
+
+echo "🍽️ Starting Feast container..."
+
+# Use VM's default service account for GCP authentication
+# The VM already has the necessary BigQuery and Storage permissions
+echo "🔑 Using VM service account for GCP authentication"
+# Ensure we're using the default compute service account
+gcloud auth list --filter=status:ACTIVE --format="value(account)" | head -n 1 > /tmp/active_account.txt
+echo "Active account: $(cat /tmp/active_account.txt)"
+# Set project explicitly
+gcloud config set project {{ project_id }}
+# Unset any explicit credentials to force use of default compute service account
+unset GOOGLE_APPLICATION_CREDENTIALS
+# The VM's default compute service account is automatically available
+# No need for explicit authentication in containerized environment
+
+# Wait for PostgreSQL to be available if using PostgreSQL
+if [ "$USE_POSTGRES" = "true" ]; then
+    echo "🔍 Waiting for PostgreSQL to be available..."
+    until pg_isready -h "$FEAST_ONLINE_STORE_HOST" -p "$FEAST_ONLINE_STORE_PORT" -U "$FEAST_ONLINE_STORE_USER"; do
+        echo "⏳ PostgreSQL not ready yet, waiting..."
+        sleep 5
+    done
+    echo "✅ PostgreSQL is ready!"
+fi
+
+# Navigate to feature repo
+cd /app/feature_repo
+
+# Copy feature store configuration if template exists and substitute environment variables
+if [ -f feature_store.yaml.template ]; then
+    echo "📝 Configuring feature store with environment variables..."
+    if command -v envsubst >/dev/null 2>&1; then
+        envsubst < feature_store.yaml.template > feature_store.yaml
+        echo "✅ Feature store configuration updated with envsubst"
+    else
+        # Fallback: manual substitution using sed
+        echo "⚠️ envsubst not available, using manual substitution..."
+        cp feature_store.yaml.template feature_store.yaml
+        sed -i "s|\$FEAST_REGISTRY_PATH|$${FEAST_REGISTRY_PATH:-data/registry.db}|g" feature_store.yaml
+        sed -i "s|\$FEAST_ONLINE_STORE_HOST|$${FEAST_ONLINE_STORE_HOST:-localhost}|g" feature_store.yaml
+        sed -i "s|\$FEAST_ONLINE_STORE_PORT|$${FEAST_ONLINE_STORE_PORT:-5432}|g" feature_store.yaml
+        sed -i "s|\$FEAST_ONLINE_STORE_DATABASE|$${FEAST_ONLINE_STORE_DATABASE:-feast}|g" feature_store.yaml
+        sed -i "s|\$FEAST_ONLINE_STORE_USER|$${FEAST_ONLINE_STORE_USER:-feast}|g" feature_store.yaml
+        sed -i "s|\$FEAST_ONLINE_STORE_PASSWORD|$${FEAST_ONLINE_STORE_PASSWORD:-}|g" feature_store.yaml
+        sed -i "s|\$FEAST_OFFLINE_STORE_PROJECT|$${FEAST_OFFLINE_STORE_PROJECT:-}|g" feature_store.yaml
+        sed -i "s|\$FEAST_OFFLINE_STORE_DATASET|$${FEAST_OFFLINE_STORE_DATASET:-feast_offline_store}|g" feature_store.yaml
+        echo "✅ Feature store configuration updated with manual substitution"
+    fi
+fi
+
+# Display current configuration (without sensitive data)
+echo "📋 Current feature store configuration:"
+grep -v "password\|PASSWORD" feature_store.yaml || true
+
+# Apply feature definitions to registry with retry logic
+echo "🚀 Applying feature definitions..."
+max_apply_retries=3
+apply_retry_count=0
+
+while [ $apply_retry_count -lt $max_apply_retries ]; do
+    if feast apply; then
+        echo "✅ Feature definitions applied successfully"
+        break
+    else
+        apply_retry_count=$((apply_retry_count + 1))
+        echo "⚠️ Failed to apply feature definitions (attempt $apply_retry_count/$max_apply_retries)"
+        if [ $apply_retry_count -lt $max_apply_retries ]; then
+            echo "⏳ Retrying in 10 seconds..."
+            sleep 10
+        else
+            echo "❌ Failed to apply feature definitions after $max_apply_retries attempts"
+            echo "⚠️ Continuing with FEAST server startup anyway..."
+            echo "💡 You can manually apply feature definitions later using: feast apply"
+            break
+        fi
+    fi
+done
+
+# Start Feast server
+echo "🌐 Starting Feast server on 0.0.0.0:6566..."
+exec feast serve --host 0.0.0.0 --port 6566
+FEAST_ENTRYPOINT_EOF
+
+    # Create Feast feature repository
+    echo "Creating Feast feature repository..."
+    mkdir -p /home/$CURRENT_USER/deployml/docker/feast/feature_repo
+    
+    # Create feature_store.yaml template that uses environment variables
+    cat > /home/$CURRENT_USER/deployml/docker/feast/feature_repo/feature_store.yaml.template << 'FEAST_CONFIG_EOF'
+project: {{ project_id | replace('-', '_') }}
+project_id: {{ project_id | replace('-', '_') }}
+# Registry configuration - uses environment variables
+{% if flags.needs_postgres %}
+registry:
+  registry_type: sql
+  path: $FEAST_REGISTRY_PATH
+{% else %}
+registry: data/registry.db
+{% endif %}
+provider: gcp
+online_store:
+{% if flags.needs_postgres %}
+  type: postgres
+  host: $FEAST_ONLINE_STORE_HOST
+  port: $FEAST_ONLINE_STORE_PORT
+  database: $FEAST_ONLINE_STORE_DATABASE
+  db_schema: public
+  user: $FEAST_ONLINE_STORE_USER
+  password: "$FEAST_ONLINE_STORE_PASSWORD"
+{% else %}
+  type: sqlite
+  path: data/online_store.db
+{% endif %}
+offline_store:
+  type: bigquery
+  project_id: $FEAST_OFFLINE_STORE_PROJECT
+  dataset: $FEAST_OFFLINE_STORE_DATASET
+entity_key_serialization_version: 3
+FEAST_CONFIG_EOF
+
+    # Create example feature definitions (based on sample sales data)
+    cat > /home/$CURRENT_USER/deployml/docker/feast/feature_repo/example_features.py << 'FEAST_FEATURES_EOF'
+from datetime import timedelta
+import pandas as pd
+from feast import (
+    BigQuerySource,
+    Entity,
+    FeatureService,
+    FeatureView,
+    Field,
+    RequestSource,
+)
+from feast.on_demand_feature_view import on_demand_feature_view
+from feast.types import Float64, Int64
+
+# Define an entity for the customer
+customer = Entity(name="customer", join_keys=["customer_id"])
+
+{% if flags.feast_params.get('sample_data', false) %}
+# Define a data source from BigQuery for sample sales data
+sample_sales_source = BigQuerySource(
+    name="sample_sales_source",
+    table="{{ project_id }}.{{ flags.feast_params.get('bigquery_dataset', 'feast_offline_store') }}.sample_sales_data",
+    timestamp_field="sale_date",
+    created_timestamp_column="created_timestamp",
+)
+
+# Feature views group features based on how they're stored
+sample_sales_fv = FeatureView(
+    name="sample_sales_features",
+    entities=[customer],
+    ttl=timedelta(weeks=52),
+    schema=[
+        Field(name="sale_amount", dtype=Float64),
+        Field(name="quantity", dtype=Int64),
+        Field(name="region", dtype=Float64),
+        Field(name="customer_segment", dtype=Float64),
+    ],
+    source=sample_sales_source,
+    tags={"team": "sales_analytics"},
+)
+
+# Define a request data source for real-time features
+input_request = RequestSource(
+    name="vals_to_add",
+    schema=[
+        Field(name="val_to_add", dtype=Int64),
+        Field(name="val_to_add_2", dtype=Int64),
+    ],
+)
+
+# On-demand feature view for real-time transformations
+@on_demand_feature_view(
+    sources=[sample_sales_fv, input_request],
+    schema=[
+        Field(name="sale_amount_plus_val1", dtype=Float64),
+        Field(name="sale_amount_plus_val2", dtype=Float64),
+    ],
+)
+def transformed_sale_amount(inputs: pd.DataFrame) -> pd.DataFrame:
+    df = pd.DataFrame()
+    df["sale_amount_plus_val1"] = inputs["sale_amount"] + inputs["val_to_add"]
+    df["sale_amount_plus_val2"] = inputs["sale_amount"] + inputs["val_to_add_2"]
+    return df
+
+# Feature service for model serving
+sales_activity_v1 = FeatureService(
+    name="sales_activity_v1",
+    features=[
+        sample_sales_fv[["sale_amount", "quantity"]],
+        transformed_sale_amount,
+    ],
+    )
+{% else %}
+# Define a data source from BigQuery for driver data (fallback)
+driver_stats_source = BigQuerySource(
+    name="driver_hourly_stats_source",
+    table="{{ project_id }}.{{ flags.feast_params.get('bigquery_dataset', 'feast_offline_store') }}.driver_hourly_stats",
+    timestamp_field="event_timestamp",
+    created_timestamp_column="created_timestamp",
+)
+
+# Feature views group features based on how they're stored
+driver_stats_fv = FeatureView(
+    name="driver_hourly_stats",
+    entities=[customer],  # Using customer entity as fallback
+    ttl=timedelta(weeks=52),
+    schema=[
+        Field(name="conv_rate", dtype=Float64),
+        Field(name="acc_rate", dtype=Float64),
+        Field(name="avg_daily_trips", dtype=Int64),
+    ],
+    source=driver_stats_source,
+    tags={"team": "driver_performance"},
+)
+
+# Define a request data source for real-time features
+input_request = RequestSource(
+    name="vals_to_add",
+    schema=[
+        Field(name="val_to_add", dtype=Int64),
+        Field(name="val_to_add_2", dtype=Int64),
+    ],
+)
+
+# On-demand feature view for real-time transformations
+@on_demand_feature_view(
+    sources=[driver_stats_fv, input_request],
+    schema=[
+        Field(name="conv_rate_plus_val1", dtype=Float64),
+        Field(name="conv_rate_plus_val2", dtype=Float64),
+    ],
+)
+def transformed_conv_rate(inputs: pd.DataFrame) -> pd.DataFrame:
+    df = pd.DataFrame()
+    df["conv_rate_plus_val1"] = inputs["conv_rate"] + inputs["val_to_add"]
+    df["conv_rate_plus_val2"] = inputs["conv_rate"] + inputs["val_to_add_2"]
+    return df
+
+# Feature service for model serving
+driver_activity_v1 = FeatureService(
+    name="driver_activity_v1",
+    features=[
+        driver_stats_fv[["conv_rate"]],
+        transformed_conv_rate,
+    ],
+    )
+{% endif %}
+FEAST_FEATURES_EOF
+
+
+{% endif %}
+
+    # Setup FastAPI application
+    echo "Setting up FastAPI application..."
+    FASTAPI_SOURCE="{{ flags.mlflow_params.get('fastapi_app_source', 'template') }}"
+    
+    if [ "$FASTAPI_SOURCE" = "template" ]; then
+        echo "Using default containerized FastAPI template..."
+        # Create a containerized FastAPI application with MLflow proxy and model integration
+        cat > /home/$CURRENT_USER/deployml/docker/fastapi/main.py << 'FASTAPI_TEMPLATE_EOF'
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import RedirectResponse, HTMLResponse
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+import httpx
+import os
+from contextlib import asynccontextmanager
+import logging
+import asyncio
+import mlflow
+import pandas as pd
+from datetime import datetime
+from typing import Optional
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# MLflow configuration - use container name for inter-container communication
+MLFLOW_BASE_URL = os.getenv("MLFLOW_BASE_URL", "http://mlflow:5000")
+MLFLOW_EXTERNAL_URL = os.getenv("MLFLOW_EXTERNAL_URL", MLFLOW_BASE_URL)  # External URL for UI links
+FASTAPI_PORT = int(os.getenv("FASTAPI_PORT", "8000"))
+
+# Global variables for model
+model = None
+feature_names = None
+model_info = {
+    "name": None,
+    "version": None,
+    "loaded_at": None,
+    "last_checked": None,
+    "status": "initializing"
+}
+
+# Configuration for model refresh
+MODEL_CHECK_INTERVAL = int(os.getenv("MODEL_CHECK_INTERVAL", "300"))  # 5 minutes default
+AUTO_REFRESH_ENABLED = os.getenv("AUTO_REFRESH_ENABLED", "true").lower() == "true"
+
+# Pydantic model for prediction request
+class PredictionRequest(BaseModel):
+    sepal_length: float
+    sepal_width: float
+    petal_length: float
+    petal_width: float
+
+async def load_mlflow_model(model_name: str = None) -> bool:
+    """Load or reload the MLflow model. Returns True if successful."""
+    global model, feature_names, model_info
+    
+    # If no model name provided, don't attempt to load
+    if not model_name:
+        logger.info("No model name provided, skipping model load")
+        model_info.update({
+            "last_checked": datetime.now().isoformat(),
+            "status": "no_model_specified"
+        })
+        return False
+    
+    try:
+        logger.info(f"Loading/refreshing MLflow model: {model_name}")
+        mlflow_tracking_uri = os.getenv("MLFLOW_TRACKING_URI", MLFLOW_BASE_URL)
+        experiment_name = os.getenv("EXPERIMENT_NAME", "iris_experiment")
+        
+        mlflow.set_tracking_uri(mlflow_tracking_uri)
+        mlflow.set_experiment(experiment_name)
+        
+        # Get model info first
+        client = mlflow.tracking.MlflowClient()
+        try:
+            latest_version = client.get_latest_versions(model_name, stages=["None", "Staging", "Production"])
+            if latest_version:
+                # Get the latest version (highest version number)
+                latest_model = max(latest_version, key=lambda x: int(x.version))
+                model_version = latest_model.version
+                
+                # Check if this is a new version
+                if model_info["version"] == model_version and model is not None and model_info["name"] == model_name:
+                    logger.info(f"Model {model_name} version {model_version} already loaded, skipping refresh")
+                    model_info["last_checked"] = datetime.now().isoformat()
+                    return True
+                
+                logger.info(f"Loading model version: {model_version}")
+            else:
+                logger.warning("No model versions found, trying latest anyway")
+                model_version = "latest"
+        except Exception as e:
+            logger.warning(f"Could not get model version info: {e}, using 'latest'")
+            model_version = "latest"
+        
+        model_uri = f"models:/{model_name}/latest"
+        new_model = mlflow.pyfunc.load_model(model_uri)
+        
+        feature_names = [
+            "sepal length",
+            "sepal width", 
+            "petal length",
+            "petal width",
+        ]
+        
+        # Update model and info atomically
+        model = new_model
+        model_info.update({
+            "name": model_name,
+            "version": model_version,
+            "loaded_at": datetime.now().isoformat(),
+            "last_checked": datetime.now().isoformat(),
+            "status": "loaded"
+        })
+        
+        logger.info(f"✅ Successfully loaded model: {model_name} (version: {model_version})")
+        return True
+        
+    except Exception as e:
+        logger.error(f"❌ Failed to load MLflow model '{model_name}': {e}")
+        model_info.update({
+            "name": model_name,
+            "last_checked": datetime.now().isoformat(),
+            "status": "error",
+            "error": str(e)
+        })
+        return False
+
+async def check_for_model_updates():
+    """Background task to periodically check for model updates."""
+    while True:
+        try:
+            if AUTO_REFRESH_ENABLED and model_info["status"] == "loaded" and model_info.get("name"):
+                logger.info(f"Checking for updates to model: {model_info['name']}")
+                await load_mlflow_model(model_info["name"])
+            await asyncio.sleep(MODEL_CHECK_INTERVAL)
+        except Exception as e:
+            logger.error(f"Error in background model check: {e}")
+            await asyncio.sleep(MODEL_CHECK_INTERVAL)
+
+async def save_model_to_registry(model_name: str, model_obj, model_version: str = None) -> bool:
+    """Helper function to save a model to the MLflow registry with fallback methods."""
+    try:
+        # Try to save as pyfunc model first
+        mlflow.pyfunc.log_model(
+            artifact_path="model",
+            python_model=model_obj,
+            registered_model_name=model_name
+        )
+        logger.info(f"✅ Saved model '{model_name}' to MLflow registry as pyfunc")
+        return True
+    except Exception as pyfunc_error:
+        logger.warning(f"Could not save as pyfunc model: {pyfunc_error}")
+        
+        # Try alternative saving methods
+        try:
+            # For scikit-learn models, try sklearn flavor
+            if hasattr(model_obj, 'predict_proba'):
+                mlflow.sklearn.log_model(
+                    model_obj,
+                    artifact_path="model",
+                    registered_model_name=model_name
+                )
+                logger.info(f"✅ Saved model '{model_name}' to MLflow registry as sklearn")
+                return True
+            else:
+                logger.warning("Model type not recognized for MLflow saving")
+                return False
+        except Exception as alt_error:
+            logger.error(f"Failed to save model with alternative method: {alt_error}")
+            return False
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Application lifespan events"""
+    logger.info("FastAPI MLflow Proxy starting...")
+    logger.info(f"Proxying requests to MLflow at: {MLFLOW_BASE_URL}")
+    logger.info(f"Auto-refresh enabled: {AUTO_REFRESH_ENABLED}, Check interval: {MODEL_CHECK_INTERVAL}s")
+    
+    # Wait for MLflow to be ready
+    logger.info("Waiting for MLflow to be ready...")
+    max_retries = 30
+    for i in range(max_retries):
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.get(f"{MLFLOW_BASE_URL}/health", timeout=5.0)
+                if response.status_code == 200:
+                    logger.info("✅ MLflow is ready!")
+                    break
+        except Exception as e:
+            logger.info(f"Waiting for MLflow... (attempt {i+1}/{max_retries})")
+            if i == max_retries - 1:
+                logger.error(f"❌ MLflow not ready after {max_retries} attempts: {e}")
+            await asyncio.sleep(2)
+    
+    # Initialize model_info without loading a model
+    model_info.update({
+        "name": None,
+        "version": None,
+        "loaded_at": None,
+        "last_checked": datetime.now().isoformat(),
+        "status": "ready"
+    })
+    logger.info("✅ FastAPI ready - awaiting model selection")
+    
+    # Start background task for model checking
+    if AUTO_REFRESH_ENABLED:
+        asyncio.create_task(check_for_model_updates())
+    
+    yield
+    logger.info("FastAPI MLflow Proxy shutting down...")
+
+# Create FastAPI application
+app = FastAPI(
+    title="MLflow Model API",
+    description="Containerized FastAPI server with MLflow model integration for predictions and MLflow proxy",
+    version="1.0.0",
+    lifespan=lifespan
+)
+
+# Add CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+@app.get("/", response_class=HTMLResponse)
+async def root():
+    """Root endpoint with links to available services"""
+    # Determine status display
+    if model is not None:
+        model_status = "✅ Model Loaded"
+    elif model_info["status"] == "ready":
+        model_status = "⏳ Ready - No Model Selected"
+    elif model_info["status"] == "error":
+        model_status = "❌ Error Loading Model"
+    else:
+        model_status = "⏳ Initializing"
+    
+    model_version = model_info.get("version", "N/A")
+    loaded_at = model_info.get("loaded_at", "N/A")
+    last_checked = model_info.get("last_checked", "Never")
+    
+    html_content = """
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>MLflow Model API</title>
+        <style>
+            body { font-family: Arial, sans-serif; margin: 40px; }
+            h1 { color: #333; }
+            .links { margin: 20px 0; }
+            .link { display: block; padding: 10px; margin: 5px 0; background: #f0f0f0; text-decoration: none; border-radius: 5px; }
+            .link:hover { background: #e0e0e0; }
+            .container-info { background: #e7f3ff; padding: 15px; border-radius: 5px; margin: 20px 0; }
+            .model-status { background: #f0f8e7; padding: 15px; border-radius: 5px; margin: 20px 0; }
+            .refresh-section { background: #fff3cd; padding: 15px; border-radius: 5px; margin: 20px 0; }
+            .refresh-button { background: #28a745; color: white; padding: 8px 16px; border: none; border-radius: 4px; cursor: pointer; text-decoration: none; display: inline-block; }
+            .refresh-button:hover { background: #218838; }
+            .config-info { background: #e2e3e5; padding: 15px; border-radius: 5px; margin: 20px 0; font-size: 0.9em; }
+        </style>
+        <script>
+            async function refreshModel() {
+                const button = document.getElementById('refresh-btn');
+                const modelNameInput = document.getElementById('model-name-input');
+                const modelName = modelNameInput.value.trim();
+                
+                if (!modelName) {
+                    alert('Please enter a model name');
+                    return;
+                }
+                
+                button.disabled = true;
+                button.textContent = 'Loading...';
+                
+                try {
+                    const response = await fetch('/refresh-model', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json'
+                        },
+                        body: JSON.stringify({ model_name: modelName })
+                    });
+                    const result = await response.json();
+                    
+                    if (response.ok) {
+                        alert('Model loaded successfully!');
+                        location.reload();
+                    } else {
+                        alert('Failed to load model: ' + result.detail);
+                    }
+                } catch (error) {
+                    alert('Error loading model: ' + error.message);
+                } finally {
+                    button.disabled = false;
+                    button.textContent = '🔄 Load Model';
+                }
+            }
+        </script>
+    </head>
+    <body>
+        <h1>🚀 MLflow Model API</h1>
+        <div class="container-info">
+            <h3>🐳 Containerized Deployment</h3>
+            <p>This FastAPI server is running in a Docker container with MLflow model integration.</p>
+            <p><strong>MLflow URL:</strong> """ + MLFLOW_EXTERNAL_URL + """</p>
+        </div>
+        <div class="model-status">
+            <h3>🤖 Model Status</h3>
+            <p><strong>Status:</strong> """ + model_status + """</p>
+            <p><strong>Model:</strong> """ + str(model_info.get('name', 'None')) + """</p>
+            <p><strong>Version:</strong> """ + str(model_version) + """</p>
+            <p><strong>Loaded At:</strong> """ + str(loaded_at) + """</p>
+            <p><strong>Last Checked:</strong> """ + str(last_checked) + """</p>
+        </div>
+        <div class="refresh-section">
+            <h3>🔄 Model Management</h3>
+            <p>Enter the MLflow model name to load:</p>
+            <input type="text" id="model-name-input" placeholder="Enter model name (e.g., iris_model)" style="padding: 8px; margin: 10px 0; width: 300px; border: 1px solid #ccc; border-radius: 4px;">
+            <br>
+            <button id="refresh-btn" class="refresh-button" onclick="refreshModel()">🔄 Load Model</button>
+        </div>
+        <div class="config-info">
+            <h3>⚙️ Configuration</h3>
+            <p><strong>Auto-refresh:</strong> """ + ('Enabled' if AUTO_REFRESH_ENABLED else 'Disabled') + """</p>
+            <p><strong>Check Interval:</strong> """ + str(MODEL_CHECK_INTERVAL) + """ seconds</p>
+            <p><strong>MLflow URL:</strong> """ + MLFLOW_EXTERNAL_URL + """</p>
+            <p><strong>Deployment:</strong> Containerized</p>
+        </div>
+        <div class="links">
+            <a class="link" href="/docs">🔮 Model Prediction (Interactive API)</a>
+            <a class="link" href="/model-info">📋 Model Information</a>
+            <a class="link" href="/mlflow">📊 MLflow UI</a>
+            <a class="link" href="/health">🏥 Health Check</a>
+            <a class="link" href="/container-info">🐳 Container Info</a>
+            <a class="link" href="/docs#/default/save_model_save_model_post">💾 Save Model to Registry</a>
+            <a class="link" href="/docs#/default/test_data_processing_test_data_processing_post">🧪 Test Data Processing</a>
+        </div>
+    </body>
+    </html>
+    """
+    return HTMLResponse(content=html_content)
+
+@app.post("/predict")
+async def predict(data: PredictionRequest):
+    """Predict using the loaded MLflow model and automatically save to MLflow registry if needed"""
+    if model is None:
+        raise HTTPException(
+            status_code=503, 
+            detail="Model not loaded. Please check MLflow configuration and ensure model exists."
+        )
+    
+    try:
+        # Convert request to DataFrame
+        input_data = pd.DataFrame([data.dict()])
+        input_data = input_data[
+            ["sepal_length", "sepal_width", "petal_length", "petal_width"]
+        ]
+        
+        # Rename columns to match training data
+        input_data.columns = feature_names
+        
+        # Make prediction
+        predictions = model.predict(input_data)
+        
+        # Create MLflow run to log prediction data
+        mlflow_tracking_uri = os.getenv("MLFLOW_TRACKING_URI", MLFLOW_BASE_URL)
+        experiment_name = os.getenv("EXPERIMENT_NAME", "iris_experiment")
+        
+        mlflow.set_tracking_uri(mlflow_tracking_uri)
+        mlflow.set_experiment(experiment_name)
+        
+        with mlflow.start_run(run_name=f"prediction_{datetime.now().strftime('%Y%m%d_%H%M%S')}"):
+            # Log prediction inputs
+            mlflow.log_params({
+                "sepal_length": data.sepal_length,
+                "sepal_width": data.sepal_width,
+                "petal_length": data.petal_length,
+                "petal_width": data.petal_width,
+                "model_name": model_info.get("name", "unknown"),
+                "model_version": model_info.get("version", "unknown"),
+                "deployment": "containerized"
+            })
+            
+            metrics_payload = {"prediction_count": float(len(predictions))}
+            # Log a numeric first prediction as metric if possible; otherwise, log as param
+            if len(predictions) > 0:
+                try:
+                    metrics_payload["prediction_value_0"] = float(predictions[0])
+                except Exception:
+                    mlflow.log_params({"prediction_value_0": str(predictions[0])})
+            mlflow.log_metrics(metrics_payload)
+            
+            # Save the model if it hasn't been saved before or if it's a new version
+            if model_info.get("name") and model_info.get("status") == "loaded":
+                try:
+                    # Check if model already exists in MLflow
+                    client = mlflow.tracking.MlflowClient()
+                    existing_models = client.search_model_versions(f"name='{model_info['name']}'")
+                    
+                    if not existing_models:
+                        # Model doesn't exist, save it
+                        await save_model_to_registry(model_info["name"], model)
+                    else:
+                        # Check if current version exists
+                        current_version = model_info.get("version", "latest")
+                        version_exists = any(v.version == str(current_version) for v in existing_models)
+                        
+                        if not version_exists:
+                            # Save new version
+                            await save_model_to_registry(model_info["name"], model, current_version)
+                            
+                except Exception as save_error:
+                    logger.warning(f"Could not save model to registry: {save_error}")
+                    # Continue with prediction even if saving fails
+        
+        return {
+            "predictions": predictions.tolist(),
+            "model_info": "MLflow loaded model",
+            "input_features": data.dict(),
+            "deployment": "containerized",
+            "mlflow_run_id": mlflow.active_run().info.run_id if mlflow.active_run() else None
+        }
+        
+    except Exception as e:
+        logger.error(f"Prediction error: {e}")
+        raise HTTPException(
+            status_code=500, 
+            detail=f"Prediction failed: {str(e)}"
+        )
+
+class ModelRefreshRequest(BaseModel):
+    model_name: str
+
+@app.post("/refresh-model")
+async def refresh_model(request: ModelRefreshRequest):
+    """Manually load or refresh the MLflow model"""
+    logger.info(f"Manual model load requested: {request.model_name}")
+    success = await load_mlflow_model(request.model_name)
+    
+    if success:
+        return {
+            "status": "success",
+            "message": f"Model '{request.model_name}' loaded successfully",
+            "model_info": model_info
+        }
+    else:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to load model '{request.model_name}': {model_info.get('error', 'Unknown error')}"
+        )
+
+@app.post("/save-model")
+async def save_model():
+    """Manually save the currently loaded model to MLflow registry"""
+    if model is None:
+        raise HTTPException(
+            status_code=503,
+            detail="No model loaded. Please load a model first."
+        )
+    
+    if not model_info.get("name"):
+        raise HTTPException(
+            status_code=400,
+            detail="Model name not available. Please refresh the model first."
+        )
+    
+    try:
+        success = await save_model_to_registry(model_info["name"], model, model_info.get("version"))
+        if success:
+            return {
+                "status": "success",
+                "message": f"Model '{model_info['name']}' saved successfully to MLflow registry",
+                "model_info": model_info
+            }
+        else:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to save model '{model_info['name']}' to registry"
+            )
+    except Exception as e:
+        logger.error(f"Error saving model: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error saving model: {str(e)}"
+        )
+
+@app.post("/test-data-processing")
+async def test_data_processing(data: PredictionRequest):
+    """Test endpoint to debug data processing without making predictions"""
+    try:
+        # Convert request to DataFrame
+        input_data = pd.DataFrame([data.dict()])
+        input_data = input_data[
+            ["sepal_length", "sepal_width", "petal_length", "petal_width"]
+        ]
+        
+        # Ensure data types are numeric
+        for col in input_data.columns:
+            input_data[col] = pd.to_numeric(input_data[col], errors='coerce')
+        
+        # Rename columns to match training data
+        input_data.columns = feature_names if feature_names else ["sepal_length", "sepal_width", "petal_length", "petal_width"]
+        
+        return {
+            "input_data_types": input_data.dtypes.to_dict(),
+            "input_data_values": input_data.values.tolist(),
+            "input_data_shape": input_data.shape,
+            "feature_names": feature_names,
+            "model_loaded": model is not None,
+            "model_type": str(type(model)) if model is not None else None
+        }
+    except Exception as e:
+        logger.error(f"Data processing test failed: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Data processing test failed: {str(e)}"
+        )
+
+@app.get("/model-info")
+async def get_model_info():
+    """Get current model information"""
+    return {
+        "model_loaded": model is not None,
+        "model_info": model_info,
+        "model_type": str(type(model)) if model is not None else None,
+        "model_has_predict": hasattr(model, 'predict') if model is not None else False,
+        "feature_names": feature_names if feature_names is not None else None,
+        "config": {
+            "auto_refresh_enabled": AUTO_REFRESH_ENABLED,
+            "check_interval_seconds": MODEL_CHECK_INTERVAL,
+            "mlflow_tracking_uri": os.getenv("MLFLOW_TRACKING_URI", "sqlite:///mlflow.db"),
+            "experiment_name": os.getenv("EXPERIMENT_NAME", "iris_experiment")
+        },
+        "deployment": "containerized"
+    }
+
+@app.get("/health")
+async def health_check():
+    """Health check endpoint"""
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(f"{MLFLOW_BASE_URL}/health", timeout=5.0)
+            if response.status_code == 200:
+                return {
+                    "status": "healthy",
+                    "mlflow": "connected",
+                    "mlflow_url": MLFLOW_BASE_URL,
+                    "proxy_port": FASTAPI_PORT,
+                    "deployment": "containerized",
+                    "model_loaded": model is not None
+                }
+            else:
+                return {
+                    "status": "unhealthy",
+                    "mlflow": "disconnected",
+                    "mlflow_status_code": response.status_code,
+                    "deployment": "containerized",
+                    "model_loaded": model is not None
+                }
+    except Exception as e:
+        logger.error(f"Health check failed: {e}")
+        return {
+            "status": "unhealthy",
+            "error": str(e),
+            "mlflow_url": MLFLOW_BASE_URL,
+            "deployment": "containerized",
+            "model_loaded": model is not None
+        }
+
+@app.get("/container-info")
+async def container_info():
+    """Container information endpoint"""
+    return {
+        "container_name": "fastapi-proxy",
+        "mlflow_container": "mlflow-server",
+        "mlflow_url": MLFLOW_BASE_URL,
+        "network": "mlflow-network",
+        "ports": {
+            "fastapi": FASTAPI_PORT,
+            "mlflow": 5000
+        },
+        "model_loaded": model is not None
+    }
+
+@app.get("/mlflow", include_in_schema=False)
+async def mlflow_ui_redirect():
+    """Redirect to MLflow UI"""
+    return RedirectResponse(url=f"{MLFLOW_EXTERNAL_URL}/")
+
+@app.get("/mlflow/{path:path}", include_in_schema=False)
+async def proxy_mlflow_ui(path: str, request: Request):
+    """Proxy MLflow UI requests"""
+    try:
+        query_params = str(request.url.query)
+        url = f"{MLFLOW_BASE_URL}/{path}"
+        if query_params:
+            url += f"?{query_params}"
+        
+        async with httpx.AsyncClient() as client:
+            response = await client.get(url, headers=dict(request.headers))
+            return response.content
+    except Exception as e:
+        logger.error(f"MLflow UI proxy error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.api_route("/api/2.0/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH"], include_in_schema=False)
+async def proxy_mlflow_api(path: str, request: Request):
+    """Proxy MLflow API requests"""
+    try:
+        query_params = str(request.url.query)
+        url = f"{MLFLOW_BASE_URL}/api/2.0/{path}"
+        if query_params:
+            url += f"?{query_params}"
+        
+        async with httpx.AsyncClient() as client:
+            response = await client.request(
+                method=request.method,
+                url=url,
+                headers=dict(request.headers),
+                content=await request.body()
+            )
+            return response.content
+    except Exception as e:
+        logger.error(f"MLflow API proxy error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=FASTAPI_PORT)
+FASTAPI_TEMPLATE_EOF
+        echo "✅ Default FastAPI template created successfully!"
+    elif [[ "$FASTAPI_SOURCE" == gs://* ]]; then
+        echo "Downloading FastAPI application from GCS: $FASTAPI_SOURCE"
+        if gsutil cp "$FASTAPI_SOURCE" /home/$CURRENT_USER/deployml/docker/fastapi/main.py; then
+            echo "✅ FastAPI application downloaded successfully from GCS!"
+        else
+            echo "❌ ERROR: Failed to download FastAPI application from GCS: $FASTAPI_SOURCE"
+            echo "Please ensure the file exists and you have proper permissions."
+            exit 1
+        fi
+    elif [[ "$FASTAPI_SOURCE" == /* ]]; then
+        echo "Copying FastAPI application from local path: $FASTAPI_SOURCE"
+        if [ -f "$FASTAPI_SOURCE" ]; then
+            cp "$FASTAPI_SOURCE" /home/$CURRENT_USER/deployml/docker/fastapi/main.py
+            echo "✅ FastAPI application copied successfully!"
+        else
+            echo "❌ ERROR: FastAPI application not found at: $FASTAPI_SOURCE"
+            echo "Please provide a valid file path or use 'template' for the default application."
+            exit 1
+        fi
+    else
+        echo "❌ ERROR: Invalid FastAPI source: $FASTAPI_SOURCE"
+        echo "Supported sources:"
+        echo "  - 'template' for default FastAPI application"
+        echo "  - 'gs://bucket/path/main.py' for GCS file"
+        echo "  - '/absolute/path/main.py' for local file"
+        exit 1
+    fi
+
+    # Set proper permissions
+    echo "Setting proper permissions for user: $CURRENT_USER"
+    sudo chown -R $CURRENT_USER:$CURRENT_USER /home/$CURRENT_USER/deployml
+    
+    # Create systemd service for Docker Compose
+    echo "Creating Docker Compose systemd service..."
+    sudo tee /etc/systemd/system/mlflow-docker.service > /dev/null <<DOCKER_SERVICE_EOF
+[Unit]
+Description=MLflow Docker Compose Stack
+After=network.target docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=true
+User=$CURRENT_USER
+Group=$CURRENT_USER
+WorkingDirectory=/home/$CURRENT_USER/deployml/docker
+Environment=MLFLOW_BACKEND_STORE_URI=${local.backend_store_uri}
+Environment=MLFLOW_DEFAULT_ARTIFACT_ROOT={% if flags.mlflow_params.get('artifact_bucket') %}gs://{{ flags.mlflow_params.artifact_bucket }}{% else %}./mlflow-artifacts{% endif %}
+{% if flags.needs_feast and flags.needs_postgres %}
+# FEAST PostgreSQL environment variables for Docker Compose
+Environment=FEAST_REGISTRY_TYPE=sql
+Environment=FEAST_REGISTRY_PATH=${local.feast_registry_uri}
+Environment=FEAST_ONLINE_STORE_TYPE=postgres
+Environment=FEAST_ONLINE_STORE_HOST=${local.feast_postgres_host}
+Environment=FEAST_ONLINE_STORE_PORT=${local.feast_postgres_port}
+Environment=FEAST_ONLINE_STORE_DATABASE=${local.feast_postgres_database}
+Environment=FEAST_ONLINE_STORE_USER=${local.feast_postgres_user}
+Environment=FEAST_ONLINE_STORE_PASSWORD=${local.feast_postgres_password}
+Environment=FEAST_OFFLINE_STORE_TYPE=bigquery
+Environment=FEAST_OFFLINE_STORE_PROJECT={{ project_id }}
+Environment=FEAST_OFFLINE_STORE_DATASET={{ flags.feast_params.get('bigquery_dataset', 'feast_offline_store') }}
+Environment=FEAST_ARTIFACT_BUCKET={{ flags.mlflow_params.get('artifact_bucket', '') }}
+Environment=GOOGLE_CLOUD_PROJECT={{ project_id }}
+Environment=USE_POSTGRES=true
+Environment=FEAST_PORT={{ flags.feast_params.get('feast_port', 6566) }}
+{% endif %}
+
+ExecStart=/usr/bin/docker compose up -d
+ExecStop=/usr/bin/docker compose down
+ExecReload=/usr/bin/docker compose restart
+Restart=no
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+DOCKER_SERVICE_EOF
+
+    # Get external IP and set environment variable for MLflow external URL
+    echo "Getting external IP for MLflow URL..."
+    EXTERNAL_IP=$(curl -s http://metadata.google.internal/computeMetadata/v1/instance/network-interfaces/0/access-configs/0/external-ip -H "Metadata-Flavor: Google")
+    echo "External IP: $EXTERNAL_IP"
+    
+    # Create .env file for Docker Compose
+    echo "Creating environment file for Docker Compose..."
+    cat > /home/$CURRENT_USER/deployml/docker/.env << ENV_EOF
+EXTERNAL_MLFLOW_URL=http://$EXTERNAL_IP:{{ flags.mlflow_params.mlflow_port }}
+ENV_EOF
+    
+    # Build Docker containers first
+    echo "Building Docker containers..."
+    cd /home/$CURRENT_USER/deployml/docker
+    if ! sudo -u $CURRENT_USER docker compose build; then
+        echo "❌ Docker build failed. Checking logs..."
+        sudo -u $CURRENT_USER docker compose logs
+        echo "❌ Exiting due to Docker build failure"
+        exit 1
+    fi
+    echo "✅ Docker containers built successfully"
+    
+    # Reload systemd and enable Docker Compose service
+    echo "Enabling Docker Compose service..."
+    sudo systemctl daemon-reload
+    sudo systemctl enable mlflow-docker.service
+    
+    echo "Starting Docker containers via systemd..."
+    sudo systemctl start mlflow-docker.service
+    
+    # Wait for containers to start
+    echo "Waiting for containers to start..."
+    sleep 30
+    
+    # Check Docker Compose service status
+    echo "Checking Docker Compose service status..."
+    sudo systemctl status mlflow-docker --no-pager
+    
+    # Check container status
+    echo "Checking container status..."
+    sudo -u $CURRENT_USER docker ps
+    
+    # Test MLflow container
+    echo "Testing MLflow container..."
+    for i in {1..10}; do
+      if curl -s http://localhost:{{ flags.mlflow_params.mlflow_port }}/health > /dev/null; then
+        echo "✅ MLflow container is running successfully!"
+        break
+      else
+        echo "Attempt $i: MLflow container not responding yet..."
+        if [ $i -eq 10 ]; then
+          echo "⚠️  MLflow container may still be starting up..."
+          echo "Checking MLflow container logs..."
+          sudo -u $CURRENT_USER docker logs mlflow-server
+        fi
+        sleep 15
+      fi
+    done
+    
+    # Test FastAPI container
+    echo "Testing FastAPI container..."
+    for i in {1..10}; do
+      if curl -s http://localhost:{{ flags.mlflow_params.get('fastapi_port', 8000) }}/health > /dev/null; then
+        echo "✅ FastAPI container is running successfully!"
+        break
+      else
+        echo "Attempt $i: FastAPI container not responding yet..."
+        if [ $i -eq 10 ]; then
+          echo "⚠️  FastAPI container may still be starting up..."
+          echo "Checking FastAPI container logs..."
+          sudo -u $CURRENT_USER docker logs fastapi-proxy
+        fi
+        sleep 15
+      fi
+    done
+    
+    {% if flags.needs_feast %}
+    # Test FEAST container
+    echo "Testing FEAST container..."
+    for i in {1..20}; do
+      if nc -z localhost {{ flags.feast_params.get('feast_port', 6566) }} 2>/dev/null; then
+        echo "✅ FEAST container is running successfully!"
+        break
+      else
+        echo "Attempt $i: FEAST container not responding yet..."
+        if [ $i -eq 20 ]; then
+          echo "⚠️  FEAST container may still be starting up..."
+          echo "Checking FEAST container logs..."
+          sudo -u $CURRENT_USER docker logs feast-server
+        fi
+        sleep 15
+      fi
+    done
+    
+    # Run FEAST validation script
+    echo "Running FEAST deployment validation..."
+    if sudo -u $CURRENT_USER /home/$CURRENT_USER/deployml/docker/validate_feast.sh; then
+        echo "✅ FEAST deployment validation passed"
+    else
+        echo "⚠️ FEAST deployment validation had issues - check logs for details"
+    fi
+    {% endif %}
+    
+    # Get external IP for display
+    EXTERNAL_IP=$(curl -s http://metadata.google.internal/computeMetadata/v1/instance/network-interfaces/0/access-configs/0/external-ip -H "Metadata-Flavor: Google")
+    echo "🐳 Containerized deployment{{ ' with PostgreSQL backend' if flags.needs_postgres else '' }} completed successfully!"
+    echo "🌐 MLflow UI will be available at: http://$EXTERNAL_IP:{{ flags.mlflow_params.mlflow_port }}"
+    echo "🚀 FastAPI Proxy will be available at: http://$EXTERNAL_IP:{{ flags.mlflow_params.get('fastapi_port', 8000) }}"
+    echo "📊 Container Info: http://$EXTERNAL_IP:{{ flags.mlflow_params.get('fastapi_port', 8000) }}/container-info"
+    {% if flags.needs_feast %}
+    echo "🍽️ FEAST Feature Server (gRPC/REST API) will be available at: http://$EXTERNAL_IP:{{ flags.feast_params.get('feast_port', 6566) }}"
+    echo "🔍 FEAST Health Check: http://$EXTERNAL_IP:{{ flags.feast_params.get('feast_port', 6566) }}/health"
+    echo "📡 FEAST gRPC Endpoint: $EXTERNAL_IP:{{ flags.feast_params.get('feast_port', 6566) }}"
+    echo "💡 Note: FEAST is a feature store API server, not a web UI. Use gRPC or REST clients to interact with it."
+    {% endif %}
+    echo "🔧 SSH into the VM with: gcloud compute ssh {{ flags.mlflow_params.vm_name }} --zone={{ zone }}"
+    echo "🐳 Manage containers: docker ps, docker logs mlflow-server, docker logs fastapi-proxy{% if flags.needs_feast %}, docker logs feast-server{% endif %}"
+    echo "🔧 Docker Compose: docker compose up -d, docker compose down, docker compose restart"
+    echo "Backend store: {{ 'PostgreSQL' if flags.needs_postgres else 'SQLite' }}"
+    {% if flags.mlflow_params.get('artifact_bucket') %}
+    echo "Artifact store: gs://{{ flags.mlflow_params.artifact_bucket }}"
+    {% endif %}
+    
+    echo "$(date): VM setup completed successfully!"
+    echo "Startup script completed successfully" | sudo tee /var/log/mlflow-startup-complete.log
+    
+EOF
+}
+
+# Firewall rules for MLflow access
+resource "google_compute_firewall" "allow_mlflow" {
+  name    = "allow-mlflow"
+  network = "default"
+  
+  # Explicit dependency to ensure APIs are ready FIRST
+  depends_on = [null_resource.api_readiness_check]
+  
+  allow {
+    protocol = "tcp"
+    ports    = ["{{ flags.mlflow_params.mlflow_port }}"]
+  }
+  source_ranges = ["0.0.0.0/0"]
+  target_tags   = ["mlflow-server"]
+}
+
+# Firewall rule to allow FastAPI traffic
+resource "google_compute_firewall" "allow_fastapi" {
+  name    = "allow-fastapi"
+  network = "default"
+  
+  # Explicit dependency to ensure APIs are ready FIRST
+  depends_on = [null_resource.api_readiness_check]
+  
+  allow {
+    protocol = "tcp"
+    ports    = ["{{ flags.mlflow_params.get('fastapi_port', 8000) }}"]
+  }
+  source_ranges = ["0.0.0.0/0"]
+  target_tags   = ["mlflow-server"]
+}
+
+{% if flags.needs_feast %}
+# Firewall rule to allow Feast server traffic
+resource "google_compute_firewall" "allow_feast" {
+  name    = "allow-feast"
+  network = "default"
+  
+  # Explicit dependency to ensure APIs are ready FIRST
+  depends_on = [null_resource.api_readiness_check]
+  
+  allow {
+    protocol = "tcp"
+    ports    = ["{{ flags.feast_params.get('feast_port', 6566) }}"]
+  }
+  source_ranges = ["0.0.0.0/0"]
+  target_tags   = ["mlflow-server"]
+}
+{% endif %}
+
+# Firewall rules for HTTP/HTTPS (if needed)
+{% if flags.mlflow_params.get("allow_public_access", false) %}
+resource "google_compute_firewall" "allow_http_https" {
+  name    = "allow-http-https"
+  network = "default"
+  
+  # Explicit dependency to ensure APIs are ready FIRST
+  depends_on = [null_resource.api_readiness_check]
+  
+  allow {
+    protocol = "tcp"
+    ports    = ["80", "443"]
+  }
+  source_ranges = ["0.0.0.0/0"]
+  target_tags   = ["http-server", "https-server"]
+}
+
+resource "google_compute_firewall" "allow_lb_health_checks" {
+  name    = "allow-lb-health-checks"
+  network = "default"
+  
+  # Explicit dependency to ensure APIs are ready FIRST
+  depends_on = [null_resource.api_readiness_check]
+  
+  allow {
+    protocol = "tcp"
+    ports    = ["80", "443"]
+  }
+  source_ranges = ["130.211.0.0/22", "35.191.0.0/16"]
+  target_tags   = ["http-server", "https-server"]
+}
+{% endif %}
+
+# Outputs
+output "vm_external_ip" {
+  value = google_compute_instance.mlflow_vm.network_interface[0].access_config[0].nat_ip
+}
+
+output "mlflow_url" {
+  value = "http://${google_compute_instance.mlflow_vm.network_interface[0].access_config[0].nat_ip}:{{ flags.mlflow_params.mlflow_port }}"
+}
+
+output "service_url" {
+  value = "http://${google_compute_instance.mlflow_vm.network_interface[0].access_config[0].nat_ip}:{{ flags.mlflow_params.mlflow_port }}"
+}
+
+output "fastapi_url" {
+  value = "http://${google_compute_instance.mlflow_vm.network_interface[0].access_config[0].nat_ip}:{{ flags.mlflow_params.get('fastapi_port', 8000) }}"
+}
+
+output "fastapi_health_url" {
+  value = "http://${google_compute_instance.mlflow_vm.network_interface[0].access_config[0].nat_ip}:{{ flags.mlflow_params.get('fastapi_port', 8000) }}/health"
+}
+
+output "container_info_url" {
+  value = "http://${google_compute_instance.mlflow_vm.network_interface[0].access_config[0].nat_ip}:{{ flags.mlflow_params.get('fastapi_port', 8000) }}/container-info"
+}
+
+{% if flags.needs_feast %}
+output "feast_url" {
+  value = "http://${google_compute_instance.mlflow_vm.network_interface[0].access_config[0].nat_ip}:{{ flags.feast_params.get('feast_port', 6566) }}"
+  description = "FEAST server base URL (gRPC/REST API server)"
+}
+
+output "feast_health_url" {
+  value = "http://${google_compute_instance.mlflow_vm.network_interface[0].access_config[0].nat_ip}:{{ flags.feast_params.get('feast_port', 6566) }}/health"
+  description = "FEAST health check endpoint"
+}
+
+output "feast_grpc_url" {
+  value = "${google_compute_instance.mlflow_vm.network_interface[0].access_config[0].nat_ip}:{{ flags.feast_params.get('feast_port', 6566) }}"
+  description = "FEAST gRPC endpoint (for gRPC clients)"
+}
+
+output "feast_ui_url" {
+  value = "http://${google_compute_instance.mlflow_vm.network_interface[0].access_config[0].nat_ip}:{{ flags.feast_params.get('feast_port', 6566) }}/health"
+  description = "FEAST health check endpoint (FEAST doesn't have a web UI, it's a gRPC/REST API server)"
+}
+
+output "feast_deployment_info" {
+  value = {
+    container_name = "feast-server"
+    port = {{ flags.feast_params.get('feast_port', 6566) }}
+    database = {% if flags.needs_postgres %}"${local.feast_postgres_database}"{% else %}"sqlite"{% endif %}
+    database_user = {% if flags.needs_postgres %}"${local.feast_postgres_user}"{% else %}"sqlite"{% endif %}
+    database_name_var = var.feast_database_name
+    database_user_var = var.feast_database_user
+    separate_database = var.feast_separate_database
+    registry_type = {% if flags.needs_postgres %}"sql"{% else %}"file"{% endif %}
+    offline_store = "bigquery"
+    offline_dataset = "{{ flags.feast_params.get('bigquery_dataset', 'feast_offline_store') }}"
+    validation_script = "/home/deployml/docker/validate_feast.sh"
+    deployment_type = "vm"
+  }
+  description = "FEAST deployment configuration and information"
+}
+{% endif %}
+
+output "docker_commands" {
+  value = {
+    check_containers = "docker ps"
+    mlflow_logs      = "docker logs mlflow-server"
+    fastapi_logs     = "docker logs fastapi-proxy"{% if flags.needs_feast %}
+    feast_logs       = "docker logs feast-server"{% endif %}
+    restart_services = "docker compose restart"
+    stop_services    = "docker compose down"
+    start_services   = "docker compose up -d"
+  }
+}
+
+output "vm_name" {
+  value = "{{ flags.mlflow_params.vm_name }}"
+}
+
+output "ssh_command" {
+  value = "gcloud compute ssh --zone {{ zone }} {{ flags.mlflow_params.vm_name }}"
+}
+
+# Artifact bucket output  
+{% if flags.mlflow_params.get("artifact_bucket") %}
+output "bucket_name" {
+  value = "{{ flags.mlflow_params.artifact_bucket }}"
+}
+{% endif %}
+
+# Zone output
+output "deployment_zone" {
+  value = "{{ zone }}"
+}
+
+# Debug outputs for IAM troubleshooting
+output "service_account_email" {
+  description = "Email of the created service account"
+  value       = google_service_account.vm_service_account.email
+}
+
+output "iam_debug_info" {
+  description = "Debug information for IAM configuration"
+  value = {
+    service_account_id = google_service_account.vm_service_account.account_id
+    project_id         = var.project_id
+    {% for stage in stack %}
+      {% for stage_name, tool in stage.items() %}
+        {% if tool.name == "mlflow" and tool.params.get("artifact_bucket") %}
+    artifact_bucket    = "{{ tool.params.artifact_bucket }}"
+    iam_bindings_created = "yes - storage permissions applied"
+        {% endif %}
+      {% endfor %}
+    {% endfor %}
+  }
+}
+
+# FEAST feature store module for VM deployment
+{% for stage in stack %}
+  {% for stage_name, tool in stage.items() %}
+    {% if stage_name == "feature_store" and tool.name == "feast" %}
+module "{{ stage_name }}_{{ tool.name }}" {
+  source              = "./modules/{{ tool.name }}/cloud/gcp/cloud_vm"
+  project_id          = var.project_id
+  region              = var.region
+  bigquery_dataset    = var.bigquery_dataset
+  create_bigquery_dataset = var.create_bigquery_dataset
+  artifact_bucket     = {% if create_artifact_bucket %}google_storage_bucket.artifact_tracking_mlflow_artifact.name{% else %}var.artifact_bucket{% endif %}
+  feast_port         = var.feast_port
+  feast_database_name = var.feast_database_name
+  feast_database_user = var.feast_database_user
+  feast_separate_database = var.feast_separate_database
+  {% if flags.needs_postgres %}
+  backend_store_uri   = "postgresql+psycopg2://${google_sql_user.feast_user.name}:${random_password.db_password.result}@${google_sql_database_instance.postgres.public_ip_address}:5432/${google_sql_database.feast_db.name}"
+  use_postgres        = true
+  postgres_host       = google_sql_database_instance.postgres.public_ip_address
+  postgres_port       = "5432"
+  postgres_database   = google_sql_database.feast_db.name
+  postgres_user       = google_sql_user.feast_user.name
+  postgres_password   = random_password.db_password.result
+  {% else %}
+  backend_store_uri   = "{{ tool.params.get('backend_store_uri', 'sqlite:///feast.db') }}"
+  use_postgres        = false
+  postgres_host       = ""
+  postgres_port       = "5432"
+  postgres_database   = ""
+  postgres_user       = ""
+  postgres_password   = ""
+  {% endif %}
+  
+  depends_on = [
+    google_compute_instance.mlflow_vm,
+    {% if flags.needs_postgres %}
+    google_sql_database_instance.postgres,
+    google_sql_database.db,
+    google_sql_user.users,
+    {% if flags.needs_feast %}
+    google_sql_database.feast_db,
+    google_sql_user.feast_user,
+    {% endif %}
+    {% endif %}
+    null_resource.api_readiness_check
+  ]
+}
+
+{% if flags.feast_params.get('sample_data', false) %}
+# Create sample sales data table for FEAST
+resource "google_bigquery_table" "sample_sales_data" {
+  dataset_id = google_bigquery_dataset.feast_offline_store[0].dataset_id
+  table_id   = "sample_sales_data"
+
+  schema = <<EOF
+[
+  {
+    "name": "customer_id",
+    "type": "STRING",
+    "mode": "REQUIRED"
+  },
+  {
+    "name": "product_id", 
+    "type": "STRING",
+    "mode": "REQUIRED"
+  },
+  {
+    "name": "sale_amount",
+    "type": "FLOAT64",
+    "mode": "REQUIRED"
+  },
+  {
+    "name": "quantity",
+    "type": "INT64",
+    "mode": "REQUIRED"
+  },
+  {
+    "name": "sale_date",
+    "type": "TIMESTAMP",
+    "mode": "REQUIRED"
+  },
+  {
+    "name": "created_timestamp",
+    "type": "TIMESTAMP",
+    "mode": "REQUIRED"
+  },
+  {
+    "name": "region",
+    "type": "STRING",
+    "mode": "REQUIRED"
+  },
+  {
+    "name": "customer_segment",
+    "type": "STRING",
+    "mode": "REQUIRED"
+  }
+]
+EOF
+
+  deletion_protection = false
+}
+
+# Insert sample sales data
+resource "google_bigquery_job" "insert_sample_data" {
+  job_id = "insert_sample_sales_data_${random_id.job_suffix.hex}"
+
+  query {
+    query = <<EOF
+INSERT INTO `${var.project_id}.${var.bigquery_dataset}.sample_sales_data` 
+(customer_id, product_id, sale_amount, quantity, sale_date, created_timestamp, region, customer_segment)
+VALUES
+('CUST001', 'PROD001', 299.99, 1, TIMESTAMP('2024-01-15 10:30:00'), TIMESTAMP('2024-01-15 10:30:00'), 'West', 'Premium'),
+('CUST002', 'PROD002', 149.50, 2, TIMESTAMP('2024-01-15 11:15:00'), TIMESTAMP('2024-01-15 11:15:00'), 'East', 'Standard'),
+('CUST003', 'PROD001', 599.98, 2, TIMESTAMP('2024-01-15 14:20:00'), TIMESTAMP('2024-01-15 14:20:00'), 'North', 'Premium'),
+('CUST004', 'PROD003', 89.99, 1, TIMESTAMP('2024-01-15 16:45:00'), TIMESTAMP('2024-01-15 16:45:00'), 'South', 'Standard'),
+('CUST005', 'PROD002', 448.50, 3, TIMESTAMP('2024-01-16 09:30:00'), TIMESTAMP('2024-01-16 09:30:00'), 'West', 'Premium'),
+('CUST006', 'PROD001', 299.99, 1, TIMESTAMP('2024-01-16 12:00:00'), TIMESTAMP('2024-01-16 12:00:00'), 'East', 'Standard'),
+('CUST007', 'PROD003', 179.98, 2, TIMESTAMP('2024-01-16 15:30:00'), TIMESTAMP('2024-01-16 15:30:00'), 'North', 'Premium'),
+('CUST008', 'PROD002', 149.50, 1, TIMESTAMP('2024-01-16 17:15:00'), TIMESTAMP('2024-01-16 17:15:00'), 'South', 'Standard'),
+('CUST009', 'PROD001', 899.97, 3, TIMESTAMP('2024-01-17 08:45:00'), TIMESTAMP('2024-01-17 08:45:00'), 'West', 'Premium'),
+('CUST010', 'PROD003', 269.97, 3, TIMESTAMP('2024-01-17 11:30:00'), TIMESTAMP('2024-01-17 11:30:00'), 'East', 'Standard')
+EOF
+
+    destination_table {
+      project_id = var.project_id
+      dataset_id = var.bigquery_dataset
+      table_id   = "sample_sales_data"
+    }
+  }
+
+  depends_on = [google_bigquery_table.sample_sales_data]
+}
+
+resource "random_id" "job_suffix" {
+  byte_length = 4
+}
+{% endif %}
+    {% endif %}
+  {% endfor %}
+{% endfor %}
+
+{% if flags.needs_postgres %}
+output "instance_connection_name" {
+  value = google_sql_database_instance.postgres.connection_name
+  description = "Cloud SQL instance connection name"
+}
+
+output "postgresql_credentials" {
+  value = {
+    db_user                  = google_sql_user.users.name
+    db_password              = random_password.db_password.result
+    db_name                  = google_sql_database.db.name
+    db_public_ip             = google_sql_database_instance.postgres.public_ip_address
+    instance_connection_name = google_sql_database_instance.postgres.connection_name
+    connection_string        = "postgresql+psycopg2://${google_sql_user.users.name}:${random_password.db_password.result}@${google_sql_database_instance.postgres.public_ip_address}:5432/${google_sql_database.db.name}"
+  }
+  sensitive = true
+  description = "PostgreSQL database credentials"
+}
+
+output "db_connection_string" {
+  value = "postgresql+psycopg2://${google_sql_user.users.name}:${random_password.db_password.result}@${google_sql_database_instance.postgres.public_ip_address}:5432/${google_sql_database.db.name}"
+  sensitive = true
+  description = "PostgreSQL connection string"
+}
+{% endif %}

@@ -19,13 +19,17 @@ resource "google_project_service" "required_apis" {
     "monitoring.googleapis.com",                # Cloud Monitoring
     "serviceusage.googleapis.com",              # Service Usage (for enabling APIs)
     "cloudresourcemanager.googleapis.com",     # Cloud Resource Manager (project operations)
+    {% if any(tool.params.get('backend_store_uri', '').startswith('postgresql') for stage in stack for stage_name, tool in stage.items()) %}
     "sqladmin.googleapis.com",                  # Cloud SQL Admin API (for PostgreSQL)
     "sql-component.googleapis.com",             # Cloud SQL component API (for PostgreSQL)
     "servicenetworking.googleapis.com",         # For private service connections (for PostgreSQL)
     "cloudkms.googleapis.com",                  # For encryption keys (if using CMEK)
+    {% endif %}
+    {% if any(tool.name == 'feast' for stage in stack for stage_name, tool in stage.items()) %}
     "bigquery.googleapis.com",                  # BigQuery API (for Feast offline store)
     "datastore.googleapis.com",                 # Datastore API (for Feast online store option)
     "bigtable.googleapis.com",                  # Bigtable API (for Feast online store option)
+    {% endif %}
   ])
 
   project = "{{ project_id }}"
@@ -49,15 +53,14 @@ resource "null_resource" "api_readiness_check" {
 }
 
 # Create Cloud SQL PostgreSQL instance if any service needs it
-{% set postgres_stages = [] %}
+{% set needs_postgres = false %}
 {% for stage in stack %}
   {% for stage_name, tool in stage.items() %}
-    {% if tool.params.backend_store_uri == "postgresql" %}
-      {% set _ = postgres_stages.append(stage_name) %}
+    {% if tool.params.get('backend_store_uri', '').startswith('postgresql') %}
+      {% set needs_postgres = true %}
     {% endif %}
   {% endfor %}
 {% endfor %}
-{% set needs_postgres = postgres_stages|length > 0 %}
 
 {% if needs_postgres %}
 # Random password for the database
@@ -105,15 +108,7 @@ resource "google_sql_user" "mlflow_user" {
   depends_on = [google_sql_database_instance.postgres]
 }
 
-{% set has_feast = false %}
-{% for stage in stack %}
-  {% for stage_name, tool in stage.items() %}
-    {% if tool.name == 'feast' %}
-      {% set has_feast = true %}
-    {% endif %}
-  {% endfor %}
-{% endfor %}
-{% if has_feast %}
+{% if any(tool.name == 'feast' for stage in stack for stage_name, tool in stage.items()) %}
 # Separate database for FEAST
 resource "google_sql_database" "feast_db" {
   name     = "feast"
@@ -133,10 +128,10 @@ resource "google_sql_user" "feast_user" {
 {% endif %}
 {% endif %}
 
-# Deploy MLflow VM if requested (single VM for all services)
+# Deploy MLflow VM if requested
 {% for stage in stack %}
   {% for stage_name, tool in stage.items() %}
-    {% if stage_name == "experiment_tracking" and tool.name == "mlflow" %}
+    {% if tool.name == "mlflow" %}
 module "mlflow_vm" {
   source = "./modules/mlflow/cloud/gcp/cloud_vm"
   
@@ -169,31 +164,56 @@ module "mlflow_vm" {
   create_bucket   = {{ 'true' if create_bucket else 'false' }}
   
   # Database Configuration
-  use_postgres = {{ 'true' if needs_postgres else 'false' }}
+  use_postgres = {{ 'true' if tool.params.get('backend_store_uri', '').startswith('postgresql') else 'false' }}
   db_password  = {% if needs_postgres %}random_password.db_password.result{% else %}""{% endif %}
   postgres_host = {% if needs_postgres %}google_sql_database_instance.postgres.public_ip_address{% else %}""{% endif %}
   
   # Access Control
   allow_public_access = {{ 'true' if tool.params.get('allow_public_access', true) else 'false' }}
   
-  # Feast Configuration (integrated into MLflow VM)
-  {% set feast_config = {} %}
-  {% for feast_stage in stack %}
-    {% for feast_stage_name, feast_tool in feast_stage.items() %}
-      {% if feast_stage_name == 'feature_store' and feast_tool.name == 'feast' %}
-        {% set feast_config = feast_tool.params %}
-      {% endif %}
-    {% endfor %}
-  {% endfor %}
-  feast_port = {{ feast_config.get('feast_port', 6566) }}
-  registry_type = "{{ feast_config.get('registry_type', 'sql' if needs_postgres else 'file') }}"
-  online_store_type = "{{ feast_config.get('online_store_type', 'postgres' if needs_postgres else 'sqlite') }}"
-  offline_store_type = "{{ feast_config.get('offline_store_type', 'bigquery') }}"
-  bigquery_dataset = "{{ feast_config.get('bigquery_dataset', 'feast_offline_store') }}"
-  create_bigquery_dataset = {{ 'true' if feast_config.get('create_bigquery_dataset', true) else 'false' }}
-  sample_data = {{ 'true' if feast_config.get('sample_data', false) else 'false' }}
-  
   depends_on = [null_resource.api_readiness_check{% if needs_postgres %}, google_sql_database_instance.postgres, google_sql_database.mlflow_db, google_sql_user.mlflow_user{% endif %}]
+}
+    {% endif %}
+  {% endfor %}
+{% endfor %}
+
+# Deploy Feast VM if requested (integrated with MLflow stage)
+{% for stage in stack %}
+  {% for stage_name, tool in stage.items() %}
+    {% if stage_name == "feature_store" and tool.name == "feast" %}
+module "feast_vm" {
+  source = "./modules/feast/cloud/gcp/cloud_vm"
+  
+  project_id = "{{ project_id }}"
+  region     = "{{ region }}"
+  zone       = "{{ zone }}"
+  
+  # VM Configuration
+  vm_name       = "{{ tool.params.service_name }}"
+  machine_type  = "{{ tool.params.get('machine_type', 'e2-medium') }}"
+  disk_size_gb  = {{ tool.params.get('disk_size_gb', 20) }}
+  
+  # Feast Configuration
+  feast_port = {{ tool.params.feast_port }}
+  registry_type = "{{ tool.params.get('registry_type', 'sql' if tool.params.get('backend_store_uri', '').startswith('postgresql') else 'file') }}"
+  online_store_type = "{{ tool.params.get('online_store_type', 'postgres' if tool.params.get('backend_store_uri', '').startswith('postgresql') else 'sqlite') }}"
+  offline_store_type = "{{ tool.params.get('offline_store_type', 'bigquery') }}"
+  
+  # Database Configuration
+  use_postgres = {{ 'true' if tool.params.get('backend_store_uri', '').startswith('postgresql') else 'false' }}
+  backend_store_uri = "{{ tool.params.get('backend_store_uri', '') }}"
+  postgres_host = {% if needs_postgres %}google_sql_database_instance.postgres.public_ip_address{% else %}""{% endif %}
+  postgres_port = "5432"
+  postgres_database = {% if needs_postgres %}google_sql_database.feast_db.name{% else %}""{% endif %}
+  postgres_user = {% if needs_postgres %}google_sql_user.feast_user.name{% else %}""{% endif %}
+  postgres_password = {% if needs_postgres %}random_password.db_password.result{% else %}""{% endif %}
+  
+  # BigQuery Configuration
+  bigquery_dataset = "{{ tool.params.get('bigquery_dataset', 'feast_offline_store') }}"
+  create_bigquery_dataset = {{ 'true' if tool.params.get('create_bigquery_dataset', true) else 'false' }}
+  sample_data = {{ 'true' if tool.params.get('sample_data', false) else 'false' }}
+  
+  depends_on = [null_resource.api_readiness_check{% if needs_postgres %}, google_sql_database_instance.postgres, google_sql_database.feast_db, google_sql_user.feast_user{% endif %}]
 }
     {% endif %}
   {% endfor %}
@@ -202,7 +222,7 @@ module "mlflow_vm" {
 # Outputs
 {% for stage in stack %}
   {% for stage_name, tool in stage.items() %}
-    {% if stage_name == "experiment_tracking" and tool.name == "mlflow" %}
+    {% if tool.name == "mlflow" %}
 output "mlflow_vm_external_ip" {
   description = "External IP address of the MLflow VM"
   value       = module.mlflow_vm.vm_external_ip
@@ -222,15 +242,27 @@ output "mlflow_ssh_command" {
   description = "SSH command to connect to MLflow VM"
   value       = module.mlflow_vm.ssh_command
 }
+    {% endif %}
+    
+    {% if stage_name == "feature_store" and tool.name == "feast" %}
+output "feast_vm_external_ip" {
+  description = "External IP address of the Feast VM"
+  value       = module.feast_vm.vm_external_ip
+}
 
 output "feast_url" {
-  description = "URL to access Feast server (on same VM)"
-  value       = module.mlflow_vm.feast_url
+  description = "URL to access Feast server"
+  value       = module.feast_vm.feast_url
 }
 
 output "feast_grpc_url" {
-  description = "Feast gRPC endpoint (on same VM)"
-  value       = module.mlflow_vm.feast_grpc_url
+  description = "Feast gRPC endpoint"
+  value       = module.feast_vm.feast_grpc_url
+}
+
+output "feast_ssh_command" {
+  description = "SSH command to connect to Feast VM"
+  value       = module.feast_vm.ssh_command
 }
     {% endif %}
   {% endfor %}
@@ -250,7 +282,7 @@ output "postgresql_credentials" {
   sensitive = true
 }
 
-output "postgresql_connection_string" {
+output "db_connection_string" {
   description = "PostgreSQL connection string"
   value       = "postgresql+psycopg2://${google_sql_user.mlflow_user.name}:${random_password.db_password.result}@${google_sql_database_instance.postgres.public_ip_address}:5432/${google_sql_user.mlflow_user.name}"
   sensitive = true
