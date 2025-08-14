@@ -65,7 +65,7 @@ resource "google_compute_instance" "mlflow_vm" {
 
   boot_disk {
     initialize_params {
-      image = "debian-cloud/debian-12" # Debian 12 (Bookworm) - better for Python/pip
+      image = "debian-cloud/debian-11" # Debian 11 (Bullseye) - stable and compatible with apt-key
       size  = var.disk_size_gb
       type  = "pd-balanced"
     }

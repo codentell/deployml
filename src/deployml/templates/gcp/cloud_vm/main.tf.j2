@@ -645,7 +645,7 @@ DOCKER_COMPOSE_EOF
     # Create MLflow Dockerfile
     echo "Creating MLflow Dockerfile..."
     cat > /home/$CURRENT_USER/deployml/docker/mlflow/Dockerfile << 'MLFLOW_DOCKERFILE_EOF'
-FROM python:3.9-slim
+FROM python:3.9-slim-bullseye
 
 # Set working directory
 WORKDIR /app
@@ -691,7 +691,7 @@ MLFLOW_DOCKERFILE_EOF
     # Create FastAPI Dockerfile
     echo "Creating FastAPI Dockerfile..."
     cat > /home/$CURRENT_USER/deployml/docker/fastapi/Dockerfile << 'FASTAPI_DOCKERFILE_EOF'
-FROM python:3.9-slim
+FROM python:3.9-slim-bullseye
 
 # Set working directory
 WORKDIR /app
@@ -746,7 +746,7 @@ FASTAPI_DOCKERFILE_EOF
     echo "Creating Feast Dockerfile..."
     mkdir -p /home/$CURRENT_USER/deployml/docker/feast
     cat > /home/$CURRENT_USER/deployml/docker/feast/Dockerfile << 'FEAST_DOCKERFILE_EOF'
-FROM python:3.9-slim
+FROM python:3.9-slim-bullseye
 
 # Set working directory
 WORKDIR /app
@@ -2068,6 +2068,7 @@ output "docker_commands" {
     restart_services = "docker compose restart"
     stop_services    = "docker compose down"
     start_services   = "docker compose up -d"
+
   }
 }
 
