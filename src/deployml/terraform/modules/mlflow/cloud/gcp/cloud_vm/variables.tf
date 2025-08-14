@@ -60,7 +60,7 @@ variable "disk_type" {
 variable "image_family" {
   type = string
   description = "VM image family"
-  default = "debian-cloud/debian-12"
+  default = "debian-cloud/debian-11"
 }
 
 variable "artifact_bucket" {
