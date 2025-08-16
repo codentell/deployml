@@ -51,3 +51,11 @@ stack:
         bigquery_dataset: feast_offline_store
         create_bigquery_dataset: true
         sample_data: true  # Set to true to create sample sales data table
+  - model_monitoring:
+      name: grafana
+      params: 
+        service_name: grafana-server
+        enable_grafana: true
+        grafana_port: 3000
+        grafana_admin_user: admin
+        grafana_admin_password: admin

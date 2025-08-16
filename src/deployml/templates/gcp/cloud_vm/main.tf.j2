@@ -78,7 +78,7 @@ provider "google" {
 }
 
 # Detect PostgreSQL and collect service configurations from all stages
-{% set flags = namespace(needs_postgres=false, needs_feast=false, first_tool_name="", mlflow_params={}, feast_params={}) %}
+{% set flags = namespace(needs_postgres=false, needs_feast=false, needs_grafana=false, first_tool_name="", mlflow_params={}, feast_params={}, grafana_params={}) %}
 {% for stage in stack %}
   {% for stage_name, tool in stage.items() %}
     {% if tool.name == "mlflow" %}
@@ -103,6 +103,12 @@ provider "google" {
           {% set flags.first_tool_name = tool.name %}
         {% endif %}
       {% endif %}
+    {% endif %}
+    {% if stage_name == "model_monitoring" and tool.name == "grafana" %}
+      {% set flags.needs_grafana = true %}
+      {% for key, value in tool.params.items() %}
+        {% set _ = flags.grafana_params.update({key: value}) %}
+      {% endfor %}
     {% endif %}
   {% endfor %}
 {% endfor %}
@@ -602,6 +608,33 @@ services:
     networks:
       - mlflow-network
     restart: unless-stopped
+{% if flags.needs_grafana %}
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: grafana-server
+    ports:
+      - "{{ flags.grafana_params.get('grafana_port', 3000) }}:3000"
+    environment:
+      - GF_SECURITY_ADMIN_USER={{ flags.grafana_params.get('grafana_admin_user', 'admin') }}
+      - GF_SECURITY_ADMIN_PASSWORD={{ flags.grafana_params.get('grafana_admin_password', 'admin') }}
+      - GF_USERS_ALLOW_SIGN_UP=false
+      - GF_SERVER_ROOT_URL=http://localhost:3000
+      - GF_INSTALL_PLUGINS=grafana-clock-panel,grafana-simple-json-datasource
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - grafana-config:/etc/grafana
+      - grafana-logs:/var/log/grafana
+    networks:
+      - mlflow-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+{% endif %}
 {% if flags.needs_feast %}
 
   feast:
@@ -633,7 +666,10 @@ services:
 
 volumes:
   mlflow-data:
-  mlflow-config:{% if flags.needs_feast %}
+  mlflow-config:{% if flags.needs_grafana %}
+  grafana-data:
+  grafana-config:
+  grafana-logs:{% endif %}{% if flags.needs_feast %}
   feast-data:
   feast-config:{% endif %}
 
@@ -1961,6 +1997,24 @@ resource "google_compute_firewall" "allow_feast" {
 }
 {% endif %}
 
+{% if flags.needs_grafana %}
+# Firewall rule to allow Grafana traffic
+resource "google_compute_firewall" "allow_grafana" {
+  name    = "allow-grafana"
+  network = "default"
+  
+  # Explicit dependency to ensure APIs are ready FIRST
+  depends_on = [null_resource.api_readiness_check]
+  
+  allow {
+    protocol = "tcp"
+    ports    = ["{{ flags.grafana_params.get('grafana_port', 3000) }}"]
+  }
+  source_ranges = ["0.0.0.0/0"]
+  target_tags   = ["mlflow-server"]
+}
+{% endif %}
+
 # Firewall rules for HTTP/HTTPS (if needed)
 {% if flags.mlflow_params.get("allow_public_access", false) %}
 resource "google_compute_firewall" "allow_http_https" {
@@ -2059,12 +2113,25 @@ output "feast_deployment_info" {
 }
 {% endif %}
 
+{% if flags.needs_grafana %}
+output "grafana_url" {
+  value = "http://${google_compute_instance.mlflow_vm.network_interface[0].access_config[0].nat_ip}:{{ flags.grafana_params.get('grafana_port', 3000) }}"
+  description = "Grafana monitoring dashboard URL"
+}
+
+output "grafana_enabled" {
+  value = true
+  description = "Whether Grafana is enabled"
+}
+{% endif %}
+
 output "docker_commands" {
   value = {
     check_containers = "docker ps"
     mlflow_logs      = "docker logs mlflow-server"
     fastapi_logs     = "docker logs fastapi-proxy"{% if flags.needs_feast %}
-    feast_logs       = "docker logs feast-server"{% endif %}
+    feast_logs       = "docker logs feast-server"{% endif %}{% if flags.needs_grafana %}
+    grafana_logs     = "docker logs grafana-server"{% endif %}
     restart_services = "docker compose restart"
     stop_services    = "docker compose down"
     start_services   = "docker compose up -d"
