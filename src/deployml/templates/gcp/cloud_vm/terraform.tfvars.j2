@@ -19,9 +19,9 @@ enable_{{ stage_name }}_{{ tool.name }} = true
     {% for key, value in tool.params.items() %}
       {% if key not in seen %}
         {%- set _ = seen.append(key) -%}
-        {% if key in ["create_service", "create_bucket", "allow_public_access", "allow_http_https", "enable_https", "use_postgres", "create_bigquery_dataset", "sample_data", "enable_grafana"] %}
+        {% if key in ["create_service", "create_bucket", "allow_public_access", "allow_http_https", "enable_https", "use_postgres", "create_bigquery_dataset", "sample_data", "enable_grafana", "airflow_separate_database"] %}
 {{ key }} = {{ "true" if value else "false" }}
-        {% elif key in ["disk_size_gb", "mlflow_port", "fastapi_port", "feast_port", "grafana_port"] %}
+        {% elif key in ["disk_size_gb", "mlflow_port", "fastapi_port", "feast_port", "grafana_port", "airflow_port", "airflow_worker_port", "airflow_flower_port", "airflow_parallelism", "airflow_dag_concurrency", "airflow_max_active_runs_per_dag"] %}
 {{ key }} = {{ value }}
         {% elif key == "tags" %}
 {{ key }} = {{ value }}
@@ -140,4 +140,41 @@ feast_database_user = "feast"
 {% endif %}
 {% if "feast_separate_database" not in seen %}
 feast_separate_database = true
+{% endif %}
+
+{% if "airflow_port" not in seen %}
+airflow_port = 8080
+{% endif %}
+{% if "airflow_worker_port" not in seen %}
+airflow_worker_port = 8793
+{% endif %}
+{% if "airflow_flower_port" not in seen %}
+airflow_flower_port = 5555
+{% endif %}
+{% if "airflow_database_name" not in seen %}
+airflow_database_name = "airflow"
+{% endif %}
+{% if "airflow_database_user" not in seen %}
+airflow_database_user = "airflow"
+{% endif %}
+{% if "airflow_separate_database" not in seen %}
+airflow_separate_database = true
+{% endif %}
+{% if "airflow_admin_user" not in seen %}
+airflow_admin_user = "admin"
+{% endif %}
+{% if "airflow_admin_password" not in seen %}
+airflow_admin_password = "admin"
+{% endif %}
+{% if "airflow_executor" not in seen %}
+airflow_executor = "LocalExecutor"
+{% endif %}
+{% if "airflow_parallelism" not in seen %}
+airflow_parallelism = 32
+{% endif %}
+{% if "airflow_dag_concurrency" not in seen %}
+airflow_dag_concurrency = 16
+{% endif %}
+{% if "airflow_max_active_runs_per_dag" not in seen %}
+airflow_max_active_runs_per_dag = 16
 {% endif %}
