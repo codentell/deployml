@@ -171,3 +171,27 @@ variable "api_dependency" {
   default = ""
 }
 
+variable "enable_grafana" {
+  type = bool
+  description = "Whether to enable Grafana monitoring service"
+  default = false
+}
+
+variable "grafana_port" {
+  type = number
+  description = "Port for Grafana server"
+  default = 3000
+}
+
+variable "grafana_admin_user" {
+  type = string
+  description = "Admin username for Grafana"
+  default = "admin"
+}
+
+variable "grafana_admin_password" {
+  type = string
+  description = "Admin password for Grafana"
+  default = "admin"
+}
+

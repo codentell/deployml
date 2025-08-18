@@ -227,9 +227,37 @@ services:
       - mlflow-network
     restart: unless-stopped
 
+  grafana:
+    image: grafana/grafana:latest
+    container_name: grafana-server
+    ports:
+      - "${var.enable_grafana ? var.grafana_port : "3000"}:3000"
+    environment:
+      - GF_SECURITY_ADMIN_USER=${var.grafana_admin_user}
+      - GF_SECURITY_ADMIN_PASSWORD=${var.grafana_admin_password}
+      - GF_USERS_ALLOW_SIGN_UP=false
+      - GF_SERVER_ROOT_URL=http://localhost:3000
+      - GF_INSTALL_PLUGINS=grafana-clock-panel,grafana-simple-json-datasource
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - grafana-config:/etc/grafana
+      - grafana-logs:/var/log/grafana
+    networks:
+      - mlflow-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
 volumes:
   mlflow-data:
   mlflow-config:
+  grafana-data:
+  grafana-config:
+  grafana-logs:
 
 networks:
   mlflow-network:
@@ -237,7 +265,6 @@ networks:
 DOCKER_COMPOSE_EOF
 
     # Create MLflow Dockerfile
-    echo "Creating MLflow Dockerfile..."
     cat > /home/$CURRENT_USER/deployml/docker/mlflow/Dockerfile << 'MLFLOW_DOCKERFILE_EOF'
 FROM python:3.9-slim
 
@@ -945,6 +972,26 @@ resource "google_compute_firewall" "allow_fastapi" {
   target_tags   = ["mlflow-server"]
 }
 
+# Firewall rule to allow Grafana traffic
+resource "google_compute_firewall" "allow_grafana" {
+  count       = var.create_service && var.allow_public_access && var.enable_grafana ? 1 : 0
+  name        = "allow-grafana-vm"
+  network     = var.network
+  project     = var.project_id
+  description = "Allow Grafana traffic to VM"
+  
+  # Explicit dependency to ensure APIs are ready FIRST
+  depends_on = [time_sleep.wait_for_api_propagation]
+
+  allow {
+    protocol = "tcp"
+    ports    = [tostring(var.grafana_port)]
+  }
+
+  source_ranges = ["0.0.0.0/0"]
+  target_tags   = ["mlflow-server"]
+}
+
 # Firewall rule to allow HTTP/HTTPS traffic (if needed for additional services)
 resource "google_compute_firewall" "allow_http_https" {
   count       = var.create_service ? 1 : 0
@@ -1042,10 +1089,21 @@ output "docker_commands" {
     check_containers = "docker ps"
     mlflow_logs      = "docker logs mlflow-server"
     fastapi_logs     = "docker logs fastapi-proxy"
+    grafana_logs     = var.enable_grafana ? "docker logs grafana-server" : "Grafana not enabled"
     restart_services = "docker-compose restart"
     stop_services    = "docker-compose down"
     start_services   = "docker-compose up -d"
   }
+}
+
+output "grafana_url" {
+  description = "URL to access Grafana UI"
+  value       = var.create_service && var.enable_grafana ? "http://${google_compute_instance.mlflow_vm[0].network_interface[0].access_config[0].nat_ip}:${var.grafana_port}" : null
+}
+
+output "grafana_enabled" {
+  description = "Whether Grafana is enabled"
+  value       = var.enable_grafana
 }
 
 # Debug outputs for IAM troubleshooting
