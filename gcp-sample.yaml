@@ -49,3 +49,12 @@ stack:
       params: 
         image: gcr.io/mlops-intro-461805/grafana/grafana:latest
         service_name: grafana-server
+
+  - offline_scoring:
+      name: offline_scoring
+      params:
+        image: gcr.io/mlops-intro-461805/offline-scoring/offline-scoring:latest
+        service_name: offline-scoring
+        cron_schedule: "0 12 * * *"
+        bigquery_dataset: feast_housing
+  
