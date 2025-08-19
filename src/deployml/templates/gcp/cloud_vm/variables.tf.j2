@@ -234,10 +234,95 @@ variable "feast_separate_database" {
   default     = true
 }
 
+# --- Airflow Configuration ---
+variable "airflow_port" {
+  description = "Port for Airflow web UI"
+  type        = number
+  default     = 8080
+}
+
+variable "airflow_worker_port" {
+  description = "Port for Airflow worker logs"
+  type        = number
+  default     = 8793
+}
+
+variable "airflow_flower_port" {
+  description = "Port for Airflow Flower monitoring"
+  type        = number
+  default     = 5555
+}
+
+variable "airflow_database_name" {
+  description = "Name of the Airflow database (defaults to 'airflow')"
+  type        = string
+  default     = "airflow"
+}
+
+variable "airflow_database_user" {
+  description = "Name of the Airflow database user (defaults to 'airflow')"
+  type        = string
+  default     = "airflow"
+}
+
+variable "airflow_separate_database" {
+  description = "Whether to use a separate database for Airflow (recommended for production)"
+  type        = bool
+  default     = true
+}
+
+variable "airflow_admin_user" {
+  description = "Airflow admin username"
+  type        = string
+  default     = "admin"
+}
+
+variable "airflow_admin_password" {
+  description = "Airflow admin password"
+  type        = string
+  default     = "admin"
+}
+
+variable "airflow_secret_key" {
+  description = "Secret key for Airflow (auto-generated if empty)"
+  type        = string
+  default     = ""
+}
+
+variable "airflow_fernet_key" {
+  description = "Fernet key for Airflow encryption (auto-generated if empty)"
+  type        = string
+  default     = ""
+}
+
+variable "airflow_executor" {
+  description = "Airflow executor type (LocalExecutor, CeleryExecutor, KubernetesExecutor)"
+  type        = string
+  default     = "LocalExecutor"
+}
+
+variable "airflow_parallelism" {
+  description = "Maximum number of task instances that can run concurrently"
+  type        = number
+  default     = 32
+}
+
+variable "airflow_dag_concurrency" {
+  description = "Maximum number of task instances that can run concurrently per DAG"
+  type        = number
+  default     = 16
+}
+
+variable "airflow_max_active_runs_per_dag" {
+  description = "Maximum number of active DAG runs per DAG"
+  type        = number
+  default     = 16
+}
+
 # --- Dynamic Variables from YAML ---
 # Add any extra YAML params as string variables if not already defined
 {%- set defined = [
-  "project_id", "region", "zone", "create_service", "create_bucket", "service_name", "vm_name", "machine_type", "disk_size_gb", "disk_type", "image_family", "artifact_bucket", "backend_store_uri", "image", "allow_public_access", "mlflow_port", "fastapi_port", "fastapi_app_source", "enable_https", "service_account_email", "network", "subnetwork", "allow_http_https", "use_postgres", "cloudsql_instance_annotation", "tags", "metadata", "startup_script", "feast_port", "registry_type", "online_store_type", "offline_store_type", "bigquery_dataset", "create_bigquery_dataset", "sample_data", "feast_database_name", "feast_database_user", "feast_separate_database"
+  "project_id", "region", "zone", "create_service", "create_bucket", "service_name", "vm_name", "machine_type", "disk_size_gb", "disk_type", "image_family", "artifact_bucket", "backend_store_uri", "image", "allow_public_access", "mlflow_port", "fastapi_port", "fastapi_app_source", "enable_https", "service_account_email", "network", "subnetwork", "allow_http_https", "use_postgres", "cloudsql_instance_annotation", "tags", "metadata", "startup_script", "feast_port", "registry_type", "online_store_type", "offline_store_type", "bigquery_dataset", "create_bigquery_dataset", "sample_data", "feast_database_name", "feast_database_user", "feast_separate_database", "enable_grafana", "grafana_port", "grafana_admin_user", "grafana_admin_password", "airflow_port", "airflow_worker_port", "airflow_flower_port", "airflow_database_name", "airflow_database_user", "airflow_separate_database", "airflow_admin_user", "airflow_admin_password", "airflow_secret_key", "airflow_fernet_key", "airflow_executor", "airflow_parallelism", "airflow_dag_concurrency", "airflow_max_active_runs_per_dag"
 ] -%}
 {%- set seen = [] -%}
 {% for stage in stack %}

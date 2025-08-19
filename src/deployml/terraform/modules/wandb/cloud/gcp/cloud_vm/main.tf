@@ -34,7 +34,7 @@ resource "google_compute_instance" "wandb_vm" {
 
   boot_disk {
     initialize_params {
-      image = "debian-cloud/debian-12"
+      image = "debian-cloud/debian-11"
       size  = var.disk_size_gb
       type  = "pd-balanced"
     }

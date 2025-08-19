@@ -60,7 +60,7 @@ variable "disk_type" {
 variable "image_family" {
   type = string
   description = "VM image family"
-  default = "debian-cloud/debian-12"
+  default = "debian-cloud/debian-11"
 }
 
 variable "artifact_bucket" {
@@ -169,5 +169,29 @@ variable "api_dependency" {
   type = string
   description = "Dependency trigger to ensure APIs are ready before creating resources"
   default = ""
+}
+
+variable "enable_grafana" {
+  type = bool
+  description = "Whether to enable Grafana monitoring service"
+  default = false
+}
+
+variable "grafana_port" {
+  type = number
+  description = "Port for Grafana server"
+  default = 3000
+}
+
+variable "grafana_admin_user" {
+  type = string
+  description = "Admin username for Grafana"
+  default = "admin"
+}
+
+variable "grafana_admin_password" {
+  type = string
+  description = "Admin password for Grafana"
+  default = "admin"
 }
 
