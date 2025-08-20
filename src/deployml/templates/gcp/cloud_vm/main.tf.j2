@@ -651,33 +651,37 @@ FEAST_ENV_EOF
 {% endif %}
 
 {% if flags.needs_airflow %}
-    # Download official Airflow docker-compose.yaml file
-    echo "Downloading official Airflow docker-compose.yaml file..."
-    cd /home/$CURRENT_USER/deployml/docker
-    curl -LfO 'https://airflow.apache.org/docs/apache-airflow/3.0.4/docker-compose.yaml'
-    
     # Create Airflow environment configuration
     echo "Setting up Airflow environment configuration..."
     cat > /home/$CURRENT_USER/deployml/docker/airflow_environment.env << 'AIRFLOW_ENV_EOF'
 AIRFLOW__CORE__EXECUTOR={{ flags.airflow_params.get('airflow_executor', 'LocalExecutor') }}
-AIRFLOW__CORE__SQL_ALCHEMY_CONN={{ 'postgresql+psycopg2://' + flags.airflow_params.get('airflow_database_user', 'airflow') + ':' + '${random_password.db_password.result}' + '@' + '${google_sql_database_instance.postgres.public_ip_address}' + ':5432/' + flags.airflow_params.get('airflow_database_name', 'airflow') if flags.needs_postgres else 'sqlite:///airflow.db' }}
+AIRFLOW__CORE__SQL_ALCHEMY_CONN=sqlite:////opt/airflow/airflow.db
 AIRFLOW__CORE__FERNET_KEY={{ '${random_password.airflow_fernet_key.result}' }}
 AIRFLOW__CORE__SECRET_KEY={{ '${random_password.airflow_secret_key.result}' }}
 AIRFLOW__CORE__LOAD_EXAMPLES=False
-AIRFLOW__WEBSERVER__SECRET_KEY={{ '${random_password.airflow_secret_key.result}' }}
-AIRFLOW__WEBSERVER__RBAC=True
+AIRFLOW__API__SECRET_KEY={{ '${random_password.airflow_secret_key.result}' }}
+AIRFLOW__API__RBAC=True
 AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION=True
 AIRFLOW__CORE__PARALLELISM={{ flags.airflow_params.get('airflow_parallelism', 32) }}
 AIRFLOW__CORE__DAG_CONCURRENCY={{ flags.airflow_params.get('airflow_dag_concurrency', 16) }}
 AIRFLOW__CORE__MAX_ACTIVE_RUNS_PER_DAG={{ flags.airflow_params.get('airflow_max_active_runs_per_dag', 16) }}
-AIRFLOW__WEBSERVER__AUTHENTICATE=True
-AIRFLOW__WEBSERVER__AUTH_BACKEND=airflow.auth.backend.basic_auth
-_AIRFLOW_DB_UPGRADE=true
+AIRFLOW__API__AUTHENTICATE=True
+AIRFLOW__API__AUTH_BACKEND=airflow.auth.backend.basic_auth
+_AIRFLOW_DB_MIGRATE=true
 _AIRFLOW_WWW_USER_CREATE=true
 _AIRFLOW_WWW_USER_USERNAME={{ flags.airflow_params.get('airflow_admin_user', 'admin') }}
 _AIRFLOW_WWW_USER_PASSWORD={{ flags.airflow_params.get('airflow_admin_password', 'admin') }}
 AIRFLOW_ENV_EOF
     chown $CURRENT_USER:$CURRENT_USER /home/$CURRENT_USER/deployml/docker/airflow_environment.env
+{% endif %}
+
+{% if flags.needs_airflow %}
+    # Set up Airflow directory and permissions
+    echo "Setting up Airflow directory and permissions..."
+    sudo mkdir -p /opt/airflow
+    sudo chown -R 50000:50000 /opt/airflow
+    sudo chmod -R 755 /opt/airflow
+    echo "✅ Airflow directory setup completed"
 {% endif %}
     
     # Create Docker Compose file
@@ -792,45 +796,42 @@ services:
       - "{{ flags.airflow_params.get('airflow_port', 8080) }}:8080"
     environment:
       - AIRFLOW__CORE__EXECUTOR={{ flags.airflow_params.get('airflow_executor', 'LocalExecutor') }}
-      - AIRFLOW__CORE__SQL_ALCHEMY_CONN=${local.airflow_sql_alchemy_conn}
+      - AIRFLOW__CORE__SQL_ALCHEMY_CONN=sqlite:////opt/airflow/airflow.db
       - AIRFLOW__CORE__FERNET_KEY=${local.airflow_fernet_key}
       - AIRFLOW__CORE__SECRET_KEY=${local.airflow_secret_key}
       - AIRFLOW__CORE__LOAD_EXAMPLES=False
-      - AIRFLOW__WEBSERVER__SECRET_KEY=${local.airflow_secret_key}
-      - AIRFLOW__WEBSERVER__RBAC=True
+      - AIRFLOW__API__SECRET_KEY=${local.airflow_secret_key}
+      - AIRFLOW__API__RBAC=True
       - AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION=True
       - AIRFLOW__CORE__PARALLELISM={{ flags.airflow_params.get('airflow_parallelism', 32) }}
       - AIRFLOW__CORE__DAG_CONCURRENCY={{ flags.airflow_params.get('airflow_dag_concurrency', 16) }}
       - AIRFLOW__CORE__MAX_ACTIVE_RUNS_PER_DAG={{ flags.airflow_params.get('airflow_max_active_runs_per_dag', 16) }}
-      - AIRFLOW__WEBSERVER__AUTHENTICATE=True
-      - AIRFLOW__WEBSERVER__AUTH_BACKEND=airflow.auth.backend.basic_auth
-      - _AIRFLOW_DB_UPGRADE=true
+      - AIRFLOW__API__AUTHENTICATE=True
+      - AIRFLOW__API__AUTH_BACKEND=airflow.auth.backend.basic_auth
       - _AIRFLOW_WWW_USER_CREATE=true
       - _AIRFLOW_WWW_USER_USERNAME={{ flags.airflow_params.get('airflow_admin_user', 'admin') }}
       - _AIRFLOW_WWW_USER_PASSWORD={{ flags.airflow_params.get('airflow_admin_password', 'admin') }}
     volumes:
-      - airflow-dags:/opt/airflow/dags
-      - airflow-logs:/opt/airflow/logs
-      - airflow-plugins:/opt/airflow/plugins
-      - airflow-config:/opt/airflow/config
+      - /opt/airflow:/opt/airflow
     networks:
       - mlflow-network
     restart: unless-stopped
     depends_on:
       - airflow-init
+    command: ["airflow", "api-server"]
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 60s
+      interval: 60s
+      timeout: 30s
+      retries: 5
+      start_period: 120s
 
   airflow-scheduler:
     image: apache/airflow:3.0.4
     container_name: airflow-scheduler
     environment:
       - AIRFLOW__CORE__EXECUTOR={{ flags.airflow_params.get('airflow_executor', 'LocalExecutor') }}
-      - AIRFLOW__CORE__SQL_ALCHEMY_CONN=${local.airflow_sql_alchemy_conn}
+      - AIRFLOW__CORE__SQL_ALCHEMY_CONN=sqlite:////opt/airflow/airflow.db
       - AIRFLOW__CORE__FERNET_KEY=${local.airflow_fernet_key}
       - AIRFLOW__CORE__SECRET_KEY=${local.airflow_secret_key}
       - AIRFLOW__CORE__LOAD_EXAMPLES=False
@@ -838,49 +839,43 @@ services:
       - AIRFLOW__CORE__PARALLELISM={{ flags.airflow_params.get('airflow_parallelism', 32) }}
       - AIRFLOW__CORE__DAG_CONCURRENCY={{ flags.airflow_params.get('airflow_dag_concurrency', 16) }}
       - AIRFLOW__CORE__MAX_ACTIVE_RUNS_PER_DAG={{ flags.airflow_params.get('airflow_max_active_runs_per_dag', 16) }}
-      - _AIRFLOW_DB_UPGRADE=true
     volumes:
-      - airflow-dags:/opt/airflow/dags
-      - airflow-logs:/opt/airflow/logs
-      - airflow-plugins:/opt/airflow/plugins
-      - airflow-config:/opt/airflow/config
+      - /opt/airflow:/opt/airflow
     networks:
       - mlflow-network
     restart: unless-stopped
     depends_on:
       - airflow-init
+    command: ["airflow", "scheduler"]
     healthcheck:
       test: ["CMD", "airflow", "jobs", "check", "--job-type", "SchedulerJob", "--hostname", "$$(hostname)"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 60s
+      interval: 60s
+      timeout: 30s
+      retries: 5
+      start_period: 120s
 
   airflow-init:
     image: apache/airflow:3.0.4
     container_name: airflow-init
     environment:
       - AIRFLOW__CORE__EXECUTOR={{ flags.airflow_params.get('airflow_executor', 'LocalExecutor') }}
-      - AIRFLOW__CORE__SQL_ALCHEMY_CONN=${local.airflow_sql_alchemy_conn}
+      - AIRFLOW__CORE__SQL_ALCHEMY_CONN=sqlite:////opt/airflow/airflow.db
       - AIRFLOW__CORE__FERNET_KEY=${local.airflow_fernet_key}
       - AIRFLOW__CORE__SECRET_KEY=${local.airflow_secret_key}
       - AIRFLOW__CORE__LOAD_EXAMPLES=False
-      - _AIRFLOW_DB_UPGRADE=true
+      - _AIRFLOW_DB_MIGRATE=true
       - _AIRFLOW_WWW_USER_CREATE=true
       - _AIRFLOW_WWW_USER_USERNAME={{ flags.airflow_params.get('airflow_admin_user', 'admin') }}
       - _AIRFLOW_WWW_USER_PASSWORD={{ flags.airflow_params.get('airflow_admin_password', 'admin') }}
     volumes:
-      - airflow-dags:/opt/airflow/dags
-      - airflow-logs:/opt/airflow/logs
-      - airflow-plugins:/opt/airflow/plugins
-      - airflow-config:/opt/airflow/config
+      - /opt/airflow:/opt/airflow
     networks:
       - mlflow-network
     restart: "no"
     depends_on:
       mlflow:
         condition: service_healthy
-    command: version
+    command: ["airflow", "db", "migrate"]
 {% endif %}
 
 volumes:
@@ -890,11 +885,7 @@ volumes:
   grafana-config:
   grafana-logs:{% endif %}{% if flags.needs_feast %}
   feast-data:
-  feast-config:{% endif %}{% if flags.needs_airflow %}
-  airflow-dags:
-  airflow-logs:
-  airflow-plugins:
-  airflow-config:{% endif %}
+  feast-config:{% endif %}
 
 networks:
   mlflow-network:
@@ -2144,6 +2135,62 @@ ENV_EOF
     fi
     {% endif %}
     
+    {% if flags.needs_airflow %}
+    # Test Airflow containers
+    echo "Testing Airflow containers..."
+    
+    # Wait for airflow-init to complete
+    echo "Waiting for Airflow initialization to complete..."
+    for i in {1..30}; do
+      if sudo -u $CURRENT_USER docker logs airflow-init 2>/dev/null | grep -q "3.0.4"; then
+        echo "✅ Airflow initialization completed successfully!"
+        break
+      else
+        echo "Attempt $i: Airflow initialization not complete yet..."
+        if [ $i -eq 30 ]; then
+          echo "⚠️  Airflow initialization may have failed..."
+          echo "Checking Airflow init container logs..."
+          sudo -u $CURRENT_USER docker logs airflow-init
+        fi
+        sleep 10
+      fi
+    done
+    
+    # Test Airflow webserver
+    echo "Testing Airflow webserver..."
+    for i in {1..20}; do
+      if curl -s http://localhost:{{ flags.airflow_params.get('airflow_port', 8080) }}/health > /dev/null; then
+        echo "✅ Airflow webserver is running successfully!"
+        break
+      else
+        echo "Attempt $i: Airflow webserver not responding yet..."
+        if [ $i -eq 20 ]; then
+          echo "⚠️  Airflow webserver may still be starting up..."
+          echo "Checking Airflow webserver logs..."
+          sudo -u $CURRENT_USER docker logs airflow-webserver
+        fi
+        sleep 15
+      fi
+    done
+    
+    # Test Airflow scheduler
+    echo "Testing Airflow scheduler..."
+    for i in {1..20}; do
+      if sudo -u $CURRENT_USER docker logs airflow-scheduler 2>/dev/null | grep -q "Application startup complete"; then
+        echo "✅ Airflow scheduler is running successfully!"
+        break
+      else
+        echo "Attempt $i: Airflow scheduler not responding yet..."
+        if [ $i -eq 20 ]; then
+          echo "⚠️  Airflow scheduler may still be starting up..."
+          echo "Checking Airflow scheduler logs..."
+          sudo -u $CURRENT_USER docker logs airflow-scheduler
+        fi
+        sleep 15
+      fi
+    done
+    {% endif %}
+    
     # Get external IP for display
     EXTERNAL_IP=$(curl -s http://metadata.google.internal/computeMetadata/v1/instance/network-interfaces/0/access-configs/0/external-ip -H "Metadata-Flavor: Google")
     echo "🐳 Containerized deployment{{ ' with PostgreSQL backend' if flags.needs_postgres else '' }} completed successfully!"
@@ -2156,8 +2203,13 @@ ENV_EOF
     echo "📡 FEAST gRPC Endpoint: $EXTERNAL_IP:{{ flags.feast_params.get('feast_port', 6566) }}"
     echo "💡 Note: FEAST is a feature store API server, not a web UI. Use gRPC or REST clients to interact with it."
     {% endif %}
+    {% if flags.needs_airflow %}
+    echo "🪂 Airflow Web UI will be available at: http://$EXTERNAL_IP:{{ flags.airflow_params.get('airflow_port', 8080) }}"
+    echo "🔑 Airflow Login: Username: {{ flags.airflow_params.get('airflow_admin_user', 'admin') }}, Password: {{ flags.airflow_params.get('airflow_admin_password', 'admin') }}"
+    echo "📊 Airflow Health Check: http://$EXTERNAL_IP:{{ flags.airflow_params.get('airflow_port', 8080) }}/health"
+    {% endif %}
     echo "🔧 SSH into the VM with: gcloud compute ssh {{ flags.mlflow_params.vm_name }} --zone={{ zone }}"
-    echo "🐳 Manage containers: docker ps, docker logs mlflow-server, docker logs fastapi-proxy{% if flags.needs_feast %}, docker logs feast-server{% endif %}"
+    echo "🐳 Manage containers: docker ps, docker logs mlflow-server, docker logs fastapi-proxy{% if flags.needs_feast %}, docker logs feast-server{% endif %}{% if flags.needs_airflow %}, docker logs airflow-webserver, docker logs airflow-scheduler{% endif %}"
     echo "🔧 Docker Compose: docker compose up -d, docker compose down, docker compose restart"
     echo "Backend store: {{ 'PostgreSQL' if flags.needs_postgres else 'SQLite' }}"
     {% if flags.mlflow_params.get('artifact_bucket') %}
