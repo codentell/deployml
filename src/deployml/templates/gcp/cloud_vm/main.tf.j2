@@ -78,7 +78,7 @@ provider "google" {
 }
 
 # Detect PostgreSQL and collect service configurations from all stages
-{% set flags = namespace(needs_postgres=false, needs_feast=false, first_tool_name="", mlflow_params={}, feast_params={}) %}
+{% set flags = namespace(needs_postgres=false, needs_feast=false, needs_grafana=false, needs_airflow=false, first_tool_name="", mlflow_params={}, feast_params={}, grafana_params={}, airflow_params={}) %}
 {% for stage in stack %}
   {% for stage_name, tool in stage.items() %}
     {% if tool.name == "mlflow" %}
@@ -96,6 +96,24 @@ provider "google" {
       {% set flags.needs_feast = true %}
       {% for key, value in tool.params.items() %}
         {% set _ = flags.feast_params.update({key: value}) %}
+      {% endfor %}
+      {% if tool.params.get("backend_store_uri", "") == "postgresql" %}
+        {% set flags.needs_postgres = true %}
+        {% if not flags.first_tool_name %}
+          {% set flags.first_tool_name = tool.name %}
+        {% endif %}
+      {% endif %}
+    {% endif %}
+    {% if stage_name == "model_monitoring" and tool.name == "grafana" %}
+      {% set flags.needs_grafana = true %}
+      {% for key, value in tool.params.items() %}
+        {% set _ = flags.grafana_params.update({key: value}) %}
+      {% endfor %}
+    {% endif %}
+    {% if stage_name == "workflow_orchestration" and tool.name == "airflow" %}
+      {% set flags.needs_airflow = true %}
+      {% for key, value in tool.params.items() %}
+        {% set _ = flags.airflow_params.update({key: value}) %}
       {% endfor %}
       {% if tool.params.get("backend_store_uri", "") == "postgresql" %}
         {% set flags.needs_postgres = true %}
@@ -124,8 +142,8 @@ resource "google_project_service" "required_apis" {
     "servicenetworking.googleapis.com",         # For private service connections
     "cloudkms.googleapis.com",                  # For encryption keys (if using CMEK)
     {% endif %}
-    {% if flags.needs_feast %}
-    "bigquery.googleapis.com",                  # BigQuery API (for Feast offline store)
+    {% if flags.needs_feast or flags.needs_airflow %}
+    "bigquery.googleapis.com",                  # BigQuery API (for Feast offline store and Airflow)
     "datastore.googleapis.com",                 # Datastore API (for Feast online store option)
     "bigtable.googleapis.com",                  # Bigtable API (for Feast online store option)
     {% endif %}
@@ -166,6 +184,19 @@ resource "random_password" "db_password" {
   override_special = "!#$*+-.=_"
 }
 
+{% if flags.needs_airflow %}
+# Random passwords for Airflow
+resource "random_password" "airflow_secret_key" {
+  length  = 32
+  special = false
+}
+
+resource "random_password" "airflow_fernet_key" {
+  length  = 32
+  special = false
+}
+{% endif %}
+
 # Cloud SQL PostgreSQL instance
 resource "google_sql_database_instance" "postgres" {
   name             = "{{ flags.first_tool_name }}-postgres-{{ project_id }}"
@@ -205,6 +236,16 @@ resource "google_sql_database" "feast_db" {
 }
 {% endif %}
 
+{% if flags.needs_airflow %}
+# Separate database for Airflow
+resource "google_sql_database" "airflow_db" {
+  name     = var.airflow_database_name
+  instance = google_sql_database_instance.postgres.name
+  project  = var.project_id
+  depends_on = [google_sql_database_instance.postgres]
+}
+{% endif %}
+
 # Database user for MLflow
 resource "google_sql_user" "users" {
   name     = "{{ flags.first_tool_name }}"
@@ -218,6 +259,17 @@ resource "google_sql_user" "users" {
 # Separate database user for FEAST
 resource "google_sql_user" "feast_user" {
   name     = var.feast_database_user
+  instance = google_sql_database_instance.postgres.name
+  password = random_password.db_password.result
+  project  = var.project_id
+  depends_on = [google_sql_database_instance.postgres]
+}
+{% endif %}
+
+{% if flags.needs_airflow %}
+# Separate database user for Airflow
+resource "google_sql_user" "airflow_user" {
+  name     = var.airflow_database_user
   instance = google_sql_database_instance.postgres.name
   password = random_password.db_password.result
   project  = var.project_id
@@ -399,6 +451,23 @@ locals {
   feast_postgres_user = google_sql_user.users.name
   feast_postgres_password = random_password.db_password.result
   {% endif %}
+
+  {% if flags.needs_airflow %}
+  # Airflow PostgreSQL configuration - use separate database and user
+  airflow_sql_alchemy_conn = "postgresql+psycopg2://${google_sql_user.airflow_user.name}:${random_password.db_password.result}@${google_sql_database_instance.postgres.public_ip_address}:5432/${google_sql_database.airflow_db.name}"
+  airflow_postgres_host = google_sql_database_instance.postgres.public_ip_address
+  airflow_postgres_port = "5432"
+  airflow_postgres_database = google_sql_database.airflow_db.name
+  airflow_postgres_user = google_sql_user.airflow_user.name
+  airflow_postgres_password = random_password.db_password.result
+  {% else %}
+  # Airflow SQLite configuration (fallback)
+  airflow_sql_alchemy_conn = "sqlite:///airflow.db"
+  {% endif %}
+
+  # Generate Airflow keys if not provided
+  airflow_secret_key = var.airflow_secret_key != "" ? var.airflow_secret_key : random_password.airflow_secret_key.result
+  airflow_fernet_key = var.airflow_fernet_key != "" ? var.airflow_fernet_key : random_password.airflow_fernet_key.result
   postgres_host = google_sql_database_instance.postgres.public_ip_address
   postgres_port = "5432"
   postgres_database = google_sql_database.db.name
@@ -494,6 +563,9 @@ locals {
     {% if flags.needs_feast %}
     mkdir -p /home/$CURRENT_USER/deployml/docker/feast
     {% endif %}
+    {% if flags.needs_airflow %}
+    mkdir -p /home/$CURRENT_USER/deployml/docker/airflow
+    {% endif %}
 
     {% if flags.needs_feast and flags.needs_postgres %}
     # Grant MLflow user access to FEAST database for cross-database operations
@@ -529,6 +601,29 @@ locals {
     echo "Database permissions setup completed"
     {% endif %}
 
+    {% if flags.needs_airflow and flags.needs_postgres %}
+    # Grant MLflow user access to Airflow database for cross-database operations
+    echo "Setting up database permissions for MLflow and Airflow..."
+    
+    # Grant MLflow user access to Airflow database
+    echo "Granting MLflow user access to Airflow database..."
+    PGPASSWORD={{ '${random_password.db_password.result}' }} psql -h {{ '${google_sql_database_instance.postgres.public_ip_address}' }} -p 5432 -U {{ flags.first_tool_name }} -d {{ '${var.airflow_database_name}' }} -c "
+    GRANT CONNECT ON DATABASE {{ '${var.airflow_database_name}' }} TO {{ flags.first_tool_name }};
+    GRANT USAGE ON SCHEMA public TO {{ flags.first_tool_name }};
+    GRANT SELECT ON ALL TABLES IN SCHEMA public TO {{ flags.first_tool_name }};
+    " || echo "Warning: Could not grant permissions (this may be normal if Airflow database doesn't exist yet)"
+    
+    # Grant Airflow user access to MLflow database (for potential cross-database operations)
+    echo "Granting Airflow user access to MLflow database..."
+    PGPASSWORD={{ '${random_password.db_password.result}' }} psql -h {{ '${google_sql_database_instance.postgres.public_ip_address}' }} -p 5432 -U {{ '${var.airflow_database_user}' }} -d {{ flags.first_tool_name }} -c "
+    GRANT CONNECT ON DATABASE {{ flags.first_tool_name }} TO {{ '${var.airflow_database_user}' }};
+    GRANT USAGE ON SCHEMA public TO {{ '${var.airflow_database_user}' }};
+    GRANT SELECT ON ALL TABLES IN SCHEMA public TO {{ flags.first_tool_name }};
+    " || echo "Warning: Could not grant permissions (this may be normal if MLflow database doesn't exist yet)"
+    
+    echo "Airflow database permissions setup completed"
+    {% endif %}
+
 {% if flags.needs_feast %}
     # Create Feast environment configuration with actual PostgreSQL credentials
     echo "Setting up Feast environment configuration..."
@@ -553,6 +648,40 @@ FEAST_PORT={{ flags.feast_params.get('feast_port', 6566) }}
 GOOGLE_APPLICATION_CREDENTIALS=
 FEAST_ENV_EOF
     chown $CURRENT_USER:$CURRENT_USER /home/$CURRENT_USER/deployml/docker/feast_environment.env
+{% endif %}
+
+{% if flags.needs_airflow %}
+    # Create Airflow environment configuration
+    echo "Setting up Airflow environment configuration..."
+    cat > /home/$CURRENT_USER/deployml/docker/airflow_environment.env << 'AIRFLOW_ENV_EOF'
+AIRFLOW__CORE__EXECUTOR={{ flags.airflow_params.get('airflow_executor', 'LocalExecutor') }}
+AIRFLOW__CORE__SQL_ALCHEMY_CONN=sqlite:////opt/airflow/airflow.db
+AIRFLOW__CORE__FERNET_KEY={{ '${random_password.airflow_fernet_key.result}' }}
+AIRFLOW__CORE__SECRET_KEY={{ '${random_password.airflow_secret_key.result}' }}
+AIRFLOW__CORE__LOAD_EXAMPLES=False
+AIRFLOW__API__SECRET_KEY={{ '${random_password.airflow_secret_key.result}' }}
+AIRFLOW__API__RBAC=True
+AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION=True
+AIRFLOW__CORE__PARALLELISM={{ flags.airflow_params.get('airflow_parallelism', 32) }}
+AIRFLOW__CORE__DAG_CONCURRENCY={{ flags.airflow_params.get('airflow_dag_concurrency', 16) }}
+AIRFLOW__CORE__MAX_ACTIVE_RUNS_PER_DAG={{ flags.airflow_params.get('airflow_max_active_runs_per_dag', 16) }}
+AIRFLOW__API__AUTHENTICATE=True
+AIRFLOW__API__AUTH_BACKEND=airflow.auth.backend.basic_auth
+_AIRFLOW_DB_MIGRATE=true
+_AIRFLOW_WWW_USER_CREATE=true
+_AIRFLOW_WWW_USER_USERNAME={{ flags.airflow_params.get('airflow_admin_user', 'admin') }}
+_AIRFLOW_WWW_USER_PASSWORD={{ flags.airflow_params.get('airflow_admin_password', 'admin') }}
+AIRFLOW_ENV_EOF
+    chown $CURRENT_USER:$CURRENT_USER /home/$CURRENT_USER/deployml/docker/airflow_environment.env
+{% endif %}
+
+{% if flags.needs_airflow %}
+    # Set up Airflow directory and permissions
+    echo "Setting up Airflow directory and permissions..."
+    sudo mkdir -p /opt/airflow
+    sudo chown -R 50000:50000 /opt/airflow
+    sudo chmod -R 755 /opt/airflow
+    echo "✅ Airflow directory setup completed"
 {% endif %}
     
     # Create Docker Compose file
@@ -602,6 +731,33 @@ services:
     networks:
       - mlflow-network
     restart: unless-stopped
+{% if flags.needs_grafana %}
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: grafana-server
+    ports:
+      - "{{ flags.grafana_params.get('grafana_port', 3000) }}:3000"
+    environment:
+      - GF_SECURITY_ADMIN_USER={{ flags.grafana_params.get('grafana_admin_user', 'admin') }}
+      - GF_SECURITY_ADMIN_PASSWORD={{ flags.grafana_params.get('grafana_admin_password', 'admin') }}
+      - GF_USERS_ALLOW_SIGN_UP=false
+      - GF_SERVER_ROOT_URL=http://localhost:3000
+      - GF_INSTALL_PLUGINS=grafana-clock-panel,grafana-simple-json-datasource
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - grafana-config:/etc/grafana
+      - grafana-logs:/var/log/grafana
+    networks:
+      - mlflow-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+{% endif %}
 {% if flags.needs_feast %}
 
   feast:
@@ -631,9 +787,103 @@ services:
       start_period: 60s
 {% endif %}
 
+{% if flags.needs_airflow %}
+
+  airflow-webserver:
+    image: apache/airflow:3.0.4
+    container_name: airflow-webserver
+    ports:
+      - "{{ flags.airflow_params.get('airflow_port', 8080) }}:8080"
+    environment:
+      - AIRFLOW__CORE__EXECUTOR={{ flags.airflow_params.get('airflow_executor', 'LocalExecutor') }}
+      - AIRFLOW__CORE__SQL_ALCHEMY_CONN=sqlite:////opt/airflow/airflow.db
+      - AIRFLOW__CORE__FERNET_KEY=${local.airflow_fernet_key}
+      - AIRFLOW__CORE__SECRET_KEY=${local.airflow_secret_key}
+      - AIRFLOW__CORE__LOAD_EXAMPLES=False
+      - AIRFLOW__API__SECRET_KEY=${local.airflow_secret_key}
+      - AIRFLOW__API__RBAC=True
+      - AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION=True
+      - AIRFLOW__CORE__PARALLELISM={{ flags.airflow_params.get('airflow_parallelism', 32) }}
+      - AIRFLOW__CORE__DAG_CONCURRENCY={{ flags.airflow_params.get('airflow_dag_concurrency', 16) }}
+      - AIRFLOW__CORE__MAX_ACTIVE_RUNS_PER_DAG={{ flags.airflow_params.get('airflow_max_active_runs_per_dag', 16) }}
+      - AIRFLOW__API__AUTHENTICATE=True
+      - AIRFLOW__API__AUTH_BACKEND=airflow.auth.backend.basic_auth
+      - _AIRFLOW_WWW_USER_CREATE=true
+      - _AIRFLOW_WWW_USER_USERNAME={{ flags.airflow_params.get('airflow_admin_user', 'admin') }}
+      - _AIRFLOW_WWW_USER_PASSWORD={{ flags.airflow_params.get('airflow_admin_password', 'admin') }}
+    volumes:
+      - /opt/airflow:/opt/airflow
+    networks:
+      - mlflow-network
+    restart: unless-stopped
+    depends_on:
+      - airflow-init
+    command: ["airflow", "api-server"]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 60s
+      timeout: 30s
+      retries: 5
+      start_period: 120s
+
+  airflow-scheduler:
+    image: apache/airflow:3.0.4
+    container_name: airflow-scheduler
+    environment:
+      - AIRFLOW__CORE__EXECUTOR={{ flags.airflow_params.get('airflow_executor', 'LocalExecutor') }}
+      - AIRFLOW__CORE__SQL_ALCHEMY_CONN=sqlite:////opt/airflow/airflow.db
+      - AIRFLOW__CORE__FERNET_KEY=${local.airflow_fernet_key}
+      - AIRFLOW__CORE__SECRET_KEY=${local.airflow_secret_key}
+      - AIRFLOW__CORE__LOAD_EXAMPLES=False
+      - AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION=True
+      - AIRFLOW__CORE__PARALLELISM={{ flags.airflow_params.get('airflow_parallelism', 32) }}
+      - AIRFLOW__CORE__DAG_CONCURRENCY={{ flags.airflow_params.get('airflow_dag_concurrency', 16) }}
+      - AIRFLOW__CORE__MAX_ACTIVE_RUNS_PER_DAG={{ flags.airflow_params.get('airflow_max_active_runs_per_dag', 16) }}
+    volumes:
+      - /opt/airflow:/opt/airflow
+    networks:
+      - mlflow-network
+    restart: unless-stopped
+    depends_on:
+      - airflow-init
+    command: ["airflow", "scheduler"]
+    healthcheck:
+      test: ["CMD", "airflow", "jobs", "check", "--job-type", "SchedulerJob", "--hostname", "$$(hostname)"]
+      interval: 60s
+      timeout: 30s
+      retries: 5
+      start_period: 120s
+
+  airflow-init:
+    image: apache/airflow:3.0.4
+    container_name: airflow-init
+    environment:
+      - AIRFLOW__CORE__EXECUTOR={{ flags.airflow_params.get('airflow_executor', 'LocalExecutor') }}
+      - AIRFLOW__CORE__SQL_ALCHEMY_CONN=sqlite:////opt/airflow/airflow.db
+      - AIRFLOW__CORE__FERNET_KEY=${local.airflow_fernet_key}
+      - AIRFLOW__CORE__SECRET_KEY=${local.airflow_secret_key}
+      - AIRFLOW__CORE__LOAD_EXAMPLES=False
+      - _AIRFLOW_DB_MIGRATE=true
+      - _AIRFLOW_WWW_USER_CREATE=true
+      - _AIRFLOW_WWW_USER_USERNAME={{ flags.airflow_params.get('airflow_admin_user', 'admin') }}
+      - _AIRFLOW_WWW_USER_PASSWORD={{ flags.airflow_params.get('airflow_admin_password', 'admin') }}
+    volumes:
+      - /opt/airflow:/opt/airflow
+    networks:
+      - mlflow-network
+    restart: "no"
+    depends_on:
+      mlflow:
+        condition: service_healthy
+    command: ["airflow", "db", "migrate"]
+{% endif %}
+
 volumes:
   mlflow-data:
-  mlflow-config:{% if flags.needs_feast %}
+  mlflow-config:{% if flags.needs_grafana %}
+  grafana-data:
+  grafana-config:
+  grafana-logs:{% endif %}{% if flags.needs_feast %}
   feast-data:
   feast-config:{% endif %}
 
@@ -645,7 +895,7 @@ DOCKER_COMPOSE_EOF
     # Create MLflow Dockerfile
     echo "Creating MLflow Dockerfile..."
     cat > /home/$CURRENT_USER/deployml/docker/mlflow/Dockerfile << 'MLFLOW_DOCKERFILE_EOF'
-FROM python:3.9-slim
+FROM python:3.9-slim-bullseye
 
 # Set working directory
 WORKDIR /app
@@ -691,7 +941,7 @@ MLFLOW_DOCKERFILE_EOF
     # Create FastAPI Dockerfile
     echo "Creating FastAPI Dockerfile..."
     cat > /home/$CURRENT_USER/deployml/docker/fastapi/Dockerfile << 'FASTAPI_DOCKERFILE_EOF'
-FROM python:3.9-slim
+FROM python:3.9-slim-bullseye
 
 # Set working directory
 WORKDIR /app
@@ -746,7 +996,7 @@ FASTAPI_DOCKERFILE_EOF
     echo "Creating Feast Dockerfile..."
     mkdir -p /home/$CURRENT_USER/deployml/docker/feast
     cat > /home/$CURRENT_USER/deployml/docker/feast/Dockerfile << 'FEAST_DOCKERFILE_EOF'
-FROM python:3.9-slim
+FROM python:3.9-slim-bullseye
 
 # Set working directory
 WORKDIR /app
@@ -1209,6 +1459,38 @@ async def check_for_model_updates():
             logger.error(f"Error in background model check: {e}")
             await asyncio.sleep(MODEL_CHECK_INTERVAL)
 
+async def save_model_to_registry(model_name: str, model_obj, model_version: str = None) -> bool:
+    """Helper function to save a model to the MLflow registry with fallback methods."""
+    try:
+        # Try to save as pyfunc model first
+        mlflow.pyfunc.log_model(
+            artifact_path="model",
+            python_model=model_obj,
+            registered_model_name=model_name
+        )
+        logger.info(f"✅ Saved model '{model_name}' to MLflow registry as pyfunc")
+        return True
+    except Exception as pyfunc_error:
+        logger.warning(f"Could not save as pyfunc model: {pyfunc_error}")
+        
+        # Try alternative saving methods
+        try:
+            # For scikit-learn models, try sklearn flavor
+            if hasattr(model_obj, 'predict_proba'):
+                mlflow.sklearn.log_model(
+                    model_obj,
+                    artifact_path="model",
+                    registered_model_name=model_name
+                )
+                logger.info(f"✅ Saved model '{model_name}' to MLflow registry as sklearn")
+                return True
+            else:
+                logger.warning("Model type not recognized for MLflow saving")
+                return False
+        except Exception as alt_error:
+            logger.error(f"Failed to save model with alternative method: {alt_error}")
+            return False
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan events"""
@@ -1375,6 +1657,8 @@ async def root():
             <a class="link" href="/mlflow">📊 MLflow UI</a>
             <a class="link" href="/health">🏥 Health Check</a>
             <a class="link" href="/container-info">🐳 Container Info</a>
+            <a class="link" href="/docs#/default/save_model_save_model_post">💾 Save Model to Registry</a>
+            <a class="link" href="/docs#/default/test_data_processing_test_data_processing_post">🧪 Test Data Processing</a>
         </div>
     </body>
     </html>
@@ -1383,7 +1667,7 @@ async def root():
 
 @app.post("/predict")
 async def predict(data: PredictionRequest):
-    """Predict using the loaded MLflow model"""
+    """Predict using the loaded MLflow model and automatically save to MLflow registry if needed"""
     if model is None:
         raise HTTPException(
             status_code=503, 
@@ -1403,11 +1687,63 @@ async def predict(data: PredictionRequest):
         # Make prediction
         predictions = model.predict(input_data)
         
+        # Create MLflow run to log prediction data
+        mlflow_tracking_uri = os.getenv("MLFLOW_TRACKING_URI", MLFLOW_BASE_URL)
+        experiment_name = os.getenv("EXPERIMENT_NAME", "iris_experiment")
+        
+        mlflow.set_tracking_uri(mlflow_tracking_uri)
+        mlflow.set_experiment(experiment_name)
+        
+        with mlflow.start_run(run_name=f"prediction_{datetime.now().strftime('%Y%m%d_%H%M%S')}"):
+            # Log prediction inputs
+            mlflow.log_params({
+                "sepal_length": data.sepal_length,
+                "sepal_width": data.sepal_width,
+                "petal_length": data.petal_length,
+                "petal_width": data.petal_width,
+                "model_name": model_info.get("name", "unknown"),
+                "model_version": model_info.get("version", "unknown"),
+                "deployment": "containerized"
+            })
+            
+            metrics_payload = {"prediction_count": float(len(predictions))}
+            # Log a numeric first prediction as metric if possible; otherwise, log as param
+            if len(predictions) > 0:
+                try:
+                    metrics_payload["prediction_value_0"] = float(predictions[0])
+                except Exception:
+                    mlflow.log_params({"prediction_value_0": str(predictions[0])})
+            mlflow.log_metrics(metrics_payload)
+            
+            # Save the model if it hasn't been saved before or if it's a new version
+            if model_info.get("name") and model_info.get("status") == "loaded":
+                try:
+                    # Check if model already exists in MLflow
+                    client = mlflow.tracking.MlflowClient()
+                    existing_models = client.search_model_versions(f"name='{model_info['name']}'")
+                    
+                    if not existing_models:
+                        # Model doesn't exist, save it
+                        await save_model_to_registry(model_info["name"], model)
+                    else:
+                        # Check if current version exists
+                        current_version = model_info.get("version", "latest")
+                        version_exists = any(v.version == str(current_version) for v in existing_models)
+                        
+                        if not version_exists:
+                            # Save new version
+                            await save_model_to_registry(model_info["name"], model, current_version)
+                            
+                except Exception as save_error:
+                    logger.warning(f"Could not save model to registry: {save_error}")
+                    # Continue with prediction even if saving fails
+        
         return {
             "predictions": predictions.tolist(),
             "model_info": "MLflow loaded model",
             "input_features": data.dict(),
-            "deployment": "containerized"
+            "deployment": "containerized",
+            "mlflow_run_id": mlflow.active_run().info.run_id if mlflow.active_run() else None
         }
         
     except Exception as e:
@@ -1438,12 +1774,82 @@ async def refresh_model(request: ModelRefreshRequest):
             detail=f"Failed to load model '{request.model_name}': {model_info.get('error', 'Unknown error')}"
         )
 
+@app.post("/save-model")
+async def save_model():
+    """Manually save the currently loaded model to MLflow registry"""
+    if model is None:
+        raise HTTPException(
+            status_code=503,
+            detail="No model loaded. Please load a model first."
+        )
+    
+    if not model_info.get("name"):
+        raise HTTPException(
+            status_code=400,
+            detail="Model name not available. Please refresh the model first."
+        )
+    
+    try:
+        success = await save_model_to_registry(model_info["name"], model, model_info.get("version"))
+        if success:
+            return {
+                "status": "success",
+                "message": f"Model '{model_info['name']}' saved successfully to MLflow registry",
+                "model_info": model_info
+            }
+        else:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to save model '{model_info['name']}' to registry"
+            )
+    except Exception as e:
+        logger.error(f"Error saving model: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error saving model: {str(e)}"
+        )
+
+@app.post("/test-data-processing")
+async def test_data_processing(data: PredictionRequest):
+    """Test endpoint to debug data processing without making predictions"""
+    try:
+        # Convert request to DataFrame
+        input_data = pd.DataFrame([data.dict()])
+        input_data = input_data[
+            ["sepal_length", "sepal_width", "petal_length", "petal_width"]
+        ]
+        
+        # Ensure data types are numeric
+        for col in input_data.columns:
+            input_data[col] = pd.to_numeric(input_data[col], errors='coerce')
+        
+        # Rename columns to match training data
+        input_data.columns = feature_names if feature_names else ["sepal_length", "sepal_width", "petal_length", "petal_width"]
+        
+        return {
+            "input_data_types": input_data.dtypes.to_dict(),
+            "input_data_values": input_data.values.tolist(),
+            "input_data_shape": input_data.shape,
+            "feature_names": feature_names,
+            "model_loaded": model is not None,
+            "model_type": str(type(model)) if model is not None else None
+        }
+    except Exception as e:
+        logger.error(f"Data processing test failed: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Data processing test failed: {str(e)}"
+        )
+
 @app.get("/model-info")
 async def get_model_info():
     """Get current model information"""
     return {
         "model_loaded": model is not None,
         "model_info": model_info,
+        "model_type": str(type(model)) if model is not None else None,
+        "model_has_predict": hasattr(model, 'predict') if model is not None else False,
+        "feature_names": feature_names if feature_names is not None else None,
         "config": {
             "auto_refresh_enabled": AUTO_REFRESH_ENABLED,
             "check_interval_seconds": MODEL_CHECK_INTERVAL,
@@ -1729,6 +2135,62 @@ ENV_EOF
     fi
     {% endif %}
     
+    {% if flags.needs_airflow %}
+    # Test Airflow containers
+    echo "Testing Airflow containers..."
+    
+    # Wait for airflow-init to complete
+    echo "Waiting for Airflow initialization to complete..."
+    for i in {1..30}; do
+      if sudo -u $CURRENT_USER docker logs airflow-init 2>/dev/null | grep -q "3.0.4"; then
+        echo "✅ Airflow initialization completed successfully!"
+        break
+      else
+        echo "Attempt $i: Airflow initialization not complete yet..."
+        if [ $i -eq 30 ]; then
+          echo "⚠️  Airflow initialization may have failed..."
+          echo "Checking Airflow init container logs..."
+          sudo -u $CURRENT_USER docker logs airflow-init
+        fi
+        sleep 10
+      fi
+    done
+    
+    # Test Airflow webserver
+    echo "Testing Airflow webserver..."
+    for i in {1..20}; do
+      if curl -s http://localhost:{{ flags.airflow_params.get('airflow_port', 8080) }}/health > /dev/null; then
+        echo "✅ Airflow webserver is running successfully!"
+        break
+      else
+        echo "Attempt $i: Airflow webserver not responding yet..."
+        if [ $i -eq 20 ]; then
+          echo "⚠️  Airflow webserver may still be starting up..."
+          echo "Checking Airflow webserver logs..."
+          sudo -u $CURRENT_USER docker logs airflow-webserver
+        fi
+        sleep 15
+      fi
+    done
+    
+    # Test Airflow scheduler
+    echo "Testing Airflow scheduler..."
+    for i in {1..20}; do
+      if sudo -u $CURRENT_USER docker logs airflow-scheduler 2>/dev/null | grep -q "Application startup complete"; then
+        echo "✅ Airflow scheduler is running successfully!"
+        break
+      else
+        echo "Attempt $i: Airflow scheduler not responding yet..."
+        if [ $i -eq 20 ]; then
+          echo "⚠️  Airflow scheduler may still be starting up..."
+          echo "Checking Airflow scheduler logs..."
+          sudo -u $CURRENT_USER docker logs airflow-scheduler
+        fi
+        sleep 15
+      fi
+    done
+    {% endif %}
+    
     # Get external IP for display
     EXTERNAL_IP=$(curl -s http://metadata.google.internal/computeMetadata/v1/instance/network-interfaces/0/access-configs/0/external-ip -H "Metadata-Flavor: Google")
     echo "🐳 Containerized deployment{{ ' with PostgreSQL backend' if flags.needs_postgres else '' }} completed successfully!"
@@ -1741,8 +2203,13 @@ ENV_EOF
     echo "📡 FEAST gRPC Endpoint: $EXTERNAL_IP:{{ flags.feast_params.get('feast_port', 6566) }}"
     echo "💡 Note: FEAST is a feature store API server, not a web UI. Use gRPC or REST clients to interact with it."
     {% endif %}
+    {% if flags.needs_airflow %}
+    echo "🪂 Airflow Web UI will be available at: http://$EXTERNAL_IP:{{ flags.airflow_params.get('airflow_port', 8080) }}"
+    echo "🔑 Airflow Login: Username: {{ flags.airflow_params.get('airflow_admin_user', 'admin') }}, Password: {{ flags.airflow_params.get('airflow_admin_password', 'admin') }}"
+    echo "📊 Airflow Health Check: http://$EXTERNAL_IP:{{ flags.airflow_params.get('airflow_port', 8080) }}/health"
+    {% endif %}
     echo "🔧 SSH into the VM with: gcloud compute ssh {{ flags.mlflow_params.vm_name }} --zone={{ zone }}"
-    echo "🐳 Manage containers: docker ps, docker logs mlflow-server, docker logs fastapi-proxy{% if flags.needs_feast %}, docker logs feast-server{% endif %}"
+    echo "🐳 Manage containers: docker ps, docker logs mlflow-server, docker logs fastapi-proxy{% if flags.needs_feast %}, docker logs feast-server{% endif %}{% if flags.needs_airflow %}, docker logs airflow-webserver, docker logs airflow-scheduler{% endif %}"
     echo "🔧 Docker Compose: docker compose up -d, docker compose down, docker compose restart"
     echo "Backend store: {{ 'PostgreSQL' if flags.needs_postgres else 'SQLite' }}"
     {% if flags.mlflow_params.get('artifact_bucket') %}
@@ -1799,6 +2266,46 @@ resource "google_compute_firewall" "allow_feast" {
   allow {
     protocol = "tcp"
     ports    = ["{{ flags.feast_params.get('feast_port', 6566) }}"]
+  }
+  source_ranges = ["0.0.0.0/0"]
+  target_tags   = ["mlflow-server"]
+}
+{% endif %}
+
+{% if flags.needs_grafana %}
+# Firewall rule to allow Grafana traffic
+resource "google_compute_firewall" "allow_grafana" {
+  name    = "allow-grafana"
+  network = "default"
+  
+  # Explicit dependency to ensure APIs are ready FIRST
+  depends_on = [null_resource.api_readiness_check]
+  
+  allow {
+    protocol = "tcp"
+    ports    = ["{{ flags.grafana_params.get('grafana_port', 3000) }}"]
+  }
+  source_ranges = ["0.0.0.0/0"]
+  target_tags   = ["mlflow-server"]
+}
+{% endif %}
+
+{% if flags.needs_airflow %}
+# Firewall rule to allow Airflow traffic
+resource "google_compute_firewall" "allow_airflow" {
+  name    = "allow-airflow"
+  network = "default"
+  
+  # Explicit dependency to ensure APIs are ready FIRST
+  depends_on = [null_resource.api_readiness_check]
+  
+  allow {
+    protocol = "tcp"
+    ports    = [
+      "{{ flags.airflow_params.get('airflow_port', 8080) }}",      # Airflow web UI
+      "{{ flags.airflow_params.get('airflow_worker_port', 8793) }}", # Airflow worker logs
+      "{{ flags.airflow_params.get('airflow_flower_port', 5555) }}"  # Airflow Flower monitoring
+    ]
   }
   source_ranges = ["0.0.0.0/0"]
   target_tags   = ["mlflow-server"]
@@ -1903,15 +2410,76 @@ output "feast_deployment_info" {
 }
 {% endif %}
 
+{% if flags.needs_grafana %}
+output "grafana_url" {
+  value = "http://${google_compute_instance.mlflow_vm.network_interface[0].access_config[0].nat_ip}:{{ flags.grafana_params.get('grafana_port', 3000) }}"
+  description = "Grafana monitoring dashboard URL"
+}
+
+output "grafana_enabled" {
+  value = true
+  description = "Whether Grafana is enabled"
+}
+{% endif %}
+
+{% if flags.needs_airflow %}
+output "airflow_url" {
+  value = "http://${google_compute_instance.mlflow_vm.network_interface[0].access_config[0].nat_ip}:{{ flags.airflow_params.get('airflow_port', 8080) }}"
+  description = "Airflow web UI URL"
+}
+
+output "airflow_worker_logs_url" {
+  value = "http://${google_compute_instance.mlflow_vm.network_interface[0].access_config[0].nat_ip}:{{ flags.airflow_params.get('airflow_worker_port', 8793) }}"
+  description = "Airflow worker logs URL"
+}
+
+output "airflow_flower_url" {
+  value = "http://${google_compute_instance.mlflow_vm.network_interface[0].access_config[0].nat_ip}:{{ flags.airflow_params.get('airflow_flower_port', 5555) }}"
+  description = "Airflow Flower monitoring URL"
+}
+
+output "airflow_enabled" {
+  value = true
+  description = "Whether Airflow is enabled"
+}
+
+output "airflow_deployment_info" {
+  value = {
+    container_names = ["airflow-webserver", "airflow-scheduler", "airflow-init"]
+    web_port = {{ flags.airflow_params.get('airflow_port', 8080) }}
+    worker_port = {{ flags.airflow_params.get('airflow_worker_port', 8793) }}
+    flower_port = {{ flags.airflow_params.get('airflow_flower_port', 5555) }}
+    database = {% if flags.needs_postgres %}"${local.airflow_postgres_database}"{% else %}"sqlite"{% endif %}
+    database_user = {% if flags.needs_postgres %}"${local.airflow_postgres_user}"{% else %}"sqlite"{% endif %}
+    database_name_var = var.airflow_database_name
+    database_user_var = var.airflow_database_user
+    separate_database = var.airflow_separate_database
+    executor = "{{ flags.airflow_params.get('airflow_executor', 'LocalExecutor') }}"
+    admin_user = "{{ flags.airflow_params.get('airflow_admin_user', 'admin') }}"
+    admin_password = "{{ flags.airflow_params.get('airflow_admin_password', 'admin') }}"
+    parallelism = {{ flags.airflow_params.get('airflow_parallelism', 32) }}
+    dag_concurrency = {{ flags.airflow_params.get('airflow_dag_concurrency', 16) }}
+    max_active_runs_per_dag = {{ flags.airflow_params.get('airflow_max_active_runs_per_dag', 16) }}
+    deployment_type = "vm"
+  }
+  description = "Airflow deployment configuration and information"
+}
+{% endif %}
+
 output "docker_commands" {
   value = {
     check_containers = "docker ps"
     mlflow_logs      = "docker logs mlflow-server"
     fastapi_logs     = "docker logs fastapi-proxy"{% if flags.needs_feast %}
-    feast_logs       = "docker logs feast-server"{% endif %}
+    feast_logs       = "docker logs feast-server"{% endif %}{% if flags.needs_grafana %}
+    grafana_logs     = "docker logs grafana-server"{% endif %}{% if flags.needs_airflow %}
+    airflow_webserver_logs = "docker logs airflow-webserver"
+    airflow_scheduler_logs = "docker logs airflow-scheduler"
+    airflow_init_logs = "docker logs airflow-init"{% endif %}
     restart_services = "docker compose restart"
     stop_services    = "docker compose down"
     start_services   = "docker compose up -d"
+
   }
 }
 
@@ -1999,6 +2567,10 @@ module "{{ stage_name }}_{{ tool.name }}" {
     {% if flags.needs_feast %}
     google_sql_database.feast_db,
     google_sql_user.feast_user,
+    {% endif %}
+    {% if flags.needs_airflow %}
+    google_sql_database.airflow_db,
+    google_sql_user.airflow_user,
     {% endif %}
     {% endif %}
     null_resource.api_readiness_check

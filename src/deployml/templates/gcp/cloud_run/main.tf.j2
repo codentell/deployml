@@ -71,7 +71,7 @@ module "{{ stage_name }}_{{ tool.name }}" {
   region     = var.region
   
   # Control what gets created based on the module purpose
-  create_service = {% if stage_name in ["experiment_tracking", "model_serving", "feature_store"] %}true{% else %}false{% endif %}
+  create_service = {% if stage_name in ["experiment_tracking", "model_serving", "feature_store", "offline_scoring"] %}true{% else %}false{% endif %}
   allow_public_access = var.allow_public_access
   
   # Resource configuration
