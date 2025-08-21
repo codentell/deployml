@@ -9,4 +9,4 @@ terraform.tfstate.backup
 
 working_Version
 square_duckling 
-data
+data/us_house_Sales_data.csv
