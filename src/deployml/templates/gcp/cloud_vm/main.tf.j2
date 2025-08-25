@@ -125,6 +125,18 @@ provider "google" {
   {% endfor %}
 {% endfor %}
 
+# Debug: Print flags for troubleshooting
+# {% if flags.needs_postgres %}
+#   <!-- PostgreSQL is enabled -->
+# {% else %}
+#   <!-- PostgreSQL is NOT enabled -->
+# {% endif %}
+# {% if flags.needs_airflow %}
+#   <!-- Airflow is enabled -->
+# {% else %}
+#   <!-- Airflow is NOT enabled -->
+# {% endif %}
+
 # Enable required Google Cloud APIs for fresh project
 resource "google_project_service" "required_apis" {
   for_each = toset([
@@ -557,6 +569,7 @@ locals {
     echo "Setting up containerized MLflow environment..."
     
     # Create deployment directory structure
+    echo "Creating deployment directory structure..."
     mkdir -p /home/$CURRENT_USER/deployml/docker
     mkdir -p /home/$CURRENT_USER/deployml/docker/mlflow
     mkdir -p /home/$CURRENT_USER/deployml/docker/fastapi
@@ -565,6 +578,17 @@ locals {
     {% endif %}
     {% if flags.needs_airflow %}
     mkdir -p /home/$CURRENT_USER/deployml/docker/airflow
+    {% endif %}
+    
+    echo "✅ Directory structure created:"
+    echo "   - /home/$CURRENT_USER/deployml/docker"
+    echo "   - /home/$CURRENT_USER/deployml/docker/mlflow"
+    echo "   - /home/$CURRENT_USER/deployml/docker/fastapi"
+    {% if flags.needs_feast %}
+    echo "   - /home/$CURRENT_USER/deployml/docker/feast"
+    {% endif %}
+    {% if flags.needs_airflow %}
+    echo "   - /home/$CURRENT_USER/deployml/docker/airflow"
     {% endif %}
 
     {% if flags.needs_feast and flags.needs_postgres %}
@@ -653,18 +677,32 @@ FEAST_ENV_EOF
 {% if flags.needs_airflow %}
     # Create Airflow environment configuration
     echo "Setting up Airflow environment configuration..."
+    
+    # Force PostgreSQL usage when Airflow is enabled and PostgreSQL is configured
+    {% if flags.needs_postgres %}
+    echo "🔧 Airflow will use PostgreSQL database"
+    {% else %}
+    echo "⚠️  WARNING: Airflow is enabled but PostgreSQL is not configured!"
+    echo "   This will cause Airflow to use SQLite, which may cause issues."
+    {% endif %}
+    
     cat > /home/$CURRENT_USER/deployml/docker/airflow_environment.env << 'AIRFLOW_ENV_EOF'
 AIRFLOW__CORE__EXECUTOR={{ flags.airflow_params.get('airflow_executor', 'LocalExecutor') }}
-AIRFLOW__CORE__SQL_ALCHEMY_CONN=sqlite:////opt/airflow/airflow.db
+{% if flags.needs_postgres %}
+AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=postgresql+psycopg2://{{ '${google_sql_user.airflow_user.name}' }}:{{ '${random_password.db_password.result}' }}@{{ '${google_sql_database_instance.postgres.public_ip_address}' }}:5432/{{ '${google_sql_database.airflow_db.name}' }}
+{% else %}
+AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=sqlite:////opt/airflow/airflow.db
+{% endif %}
 AIRFLOW__CORE__FERNET_KEY={{ '${random_password.airflow_fernet_key.result}' }}
 AIRFLOW__CORE__SECRET_KEY={{ '${random_password.airflow_secret_key.result}' }}
 AIRFLOW__CORE__LOAD_EXAMPLES=False
 AIRFLOW__API__SECRET_KEY={{ '${random_password.airflow_secret_key.result}' }}
 AIRFLOW__API__RBAC=True
 AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION=True
-AIRFLOW__CORE__PARALLELISM={{ flags.airflow_params.get('airflow_parallelism', 32) }}
-AIRFLOW__CORE__DAG_CONCURRENCY={{ flags.airflow_params.get('airflow_dag_concurrency', 16) }}
-AIRFLOW__CORE__MAX_ACTIVE_RUNS_PER_DAG={{ flags.airflow_params.get('airflow_max_active_runs_per_dag', 16) }}
+AIRFLOW__CORE__PARALLELISM={{ flags.airflow_params.get('airflow_parallelism', 4) }}
+AIRFLOW__CORE__DAG_CONCURRENCY={{ flags.airflow_params.get('airflow_dag_concurrency', 2) }}
+AIRFLOW__CORE__MAX_ACTIVE_RUNS_PER_DAG={{ flags.airflow_params.get('airflow_max_active_runs_per_dag', 2) }}
+AIRFLOW__API__WORKERS={{ flags.airflow_params.get('airflow_webserver_workers', 2) }}
 AIRFLOW__API__AUTHENTICATE=True
 AIRFLOW__API__AUTH_BACKEND=airflow.auth.backend.basic_auth
 _AIRFLOW_DB_MIGRATE=true
@@ -673,6 +711,23 @@ _AIRFLOW_WWW_USER_USERNAME={{ flags.airflow_params.get('airflow_admin_user', 'ad
 _AIRFLOW_WWW_USER_PASSWORD={{ flags.airflow_params.get('airflow_admin_password', 'admin') }}
 AIRFLOW_ENV_EOF
     chown $CURRENT_USER:$CURRENT_USER /home/$CURRENT_USER/deployml/docker/airflow_environment.env
+    
+    echo "✅ Airflow environment file created at /home/$CURRENT_USER/deployml/docker/airflow_environment.env"
+    echo "📁 File size: $(wc -c < /home/$CURRENT_USER/deployml/docker/airflow_environment.env) bytes"
+    echo "🔧 Airflow will use: {% if flags.needs_postgres %}PostgreSQL{% else %}SQLite{% endif %} database"
+    
+    # Show the actual database connection string that will be used
+    echo "🔍 Database connection details:"
+    {% if flags.needs_postgres %}
+    echo "   Type: PostgreSQL"
+    echo "   Host: {{ '${google_sql_database_instance.postgres.public_ip_address}' }}"
+    echo "   Port: 5432"
+    echo "   Database: {{ '${google_sql_database.airflow_db.name}' }}"
+    echo "   User: {{ '${google_sql_user.airflow_user.name}' }}"
+    {% else %}
+    echo "   Type: SQLite"
+    echo "   Path: /opt/airflow/airflow.db"
+    {% endif %}
 {% endif %}
 
 {% if flags.needs_airflow %}
@@ -682,6 +737,25 @@ AIRFLOW_ENV_EOF
     sudo chown -R 50000:50000 /opt/airflow
     sudo chmod -R 755 /opt/airflow
     echo "✅ Airflow directory setup completed"
+    
+    {% if flags.needs_postgres %}
+    # Wait for PostgreSQL to be ready for Airflow
+    echo "Waiting for PostgreSQL to be ready for Airflow..."
+    echo "🔍 Checking PostgreSQL connection for Airflow..."
+    echo "   Host: {{ '${google_sql_database_instance.postgres.public_ip_address}' }}"
+    echo "   Port: 5432"
+    echo "   User: {{ '${google_sql_user.airflow_user.name}' }}"
+    echo "   Database: {{ '${google_sql_database.airflow_db.name}' }}"
+    
+    until pg_isready -h {{ '${google_sql_database_instance.postgres.public_ip_address}' }} -p 5432 -U {{ '${google_sql_user.airflow_user.name}' }}; do
+        echo "PostgreSQL not ready yet for Airflow, waiting..."
+        sleep 5
+    done
+    echo "✅ PostgreSQL is ready for Airflow!"
+    {% else %}
+    echo "⚠️  WARNING: PostgreSQL not configured for Airflow - will use SQLite!"
+    echo "   This may cause issues with multi-container deployments."
+    {% endif %}
 {% endif %}
     
     # Create Docker Compose file
@@ -698,7 +772,7 @@ services:
     ports:
       - "{{ flags.mlflow_params.mlflow_port }}:5000"
     environment:
-      - MLFLOW_BACKEND_STORE_URI=${local.backend_store_uri}
+      - MLFLOW_BACKEND_STORE_URI={% if flags.needs_postgres %}postgresql+psycopg2://{{ flags.first_tool_name }}:{{ '${random_password.db_password.result}' }}@{{ '${google_sql_database_instance.postgres.public_ip_address}' }}:5432/{{ '${google_sql_database.db.name}' }}{% else %}sqlite:///mlflow.db{% endif %}
       - MLFLOW_DEFAULT_ARTIFACT_ROOT={% if flags.mlflow_params.get('artifact_bucket') %}gs://{{ flags.mlflow_params.artifact_bucket }}{% else %}./mlflow-artifacts{% endif %}
       - MLFLOW_SERVER_HOST=0.0.0.0
       - MLFLOW_SERVER_PORT=5000
@@ -712,7 +786,7 @@ services:
       mlflow server 
       --host 0.0.0.0 
       --port 5000
-      --backend-store-uri ${local.backend_store_uri}
+      --backend-store-uri {% if flags.needs_postgres %}postgresql+psycopg2://{{ flags.first_tool_name }}:{{ '${random_password.db_password.result}' }}@{{ '${google_sql_database_instance.postgres.public_ip_address}' }}:5432/{{ '${google_sql_database.db.name}' }}{% else %}sqlite:///mlflow.db{% endif %}
       --default-artifact-root {% if flags.mlflow_params.get('artifact_bucket') %}gs://{{ flags.mlflow_params.artifact_bucket }}{% else %}./mlflow-artifacts{% endif %}
     
   fastapi:
@@ -796,21 +870,20 @@ services:
       - "{{ flags.airflow_params.get('airflow_port', 8080) }}:8080"
     environment:
       - AIRFLOW__CORE__EXECUTOR={{ flags.airflow_params.get('airflow_executor', 'LocalExecutor') }}
-      - AIRFLOW__CORE__SQL_ALCHEMY_CONN=sqlite:////opt/airflow/airflow.db
-      - AIRFLOW__CORE__FERNET_KEY=${local.airflow_fernet_key}
-      - AIRFLOW__CORE__SECRET_KEY=${local.airflow_secret_key}
+      - AIRFLOW__DATABASE__SQL_ALCHEMY_CONN={% if flags.needs_airflow and flags.needs_postgres %}postgresql+psycopg2://{{ '${google_sql_user.airflow_user.name}' }}:{{ '${random_password.db_password.result}' }}@{{ '${google_sql_database_instance.postgres.public_ip_address}' }}:5432/{{ '${google_sql_database.airflow_db.name}' }}{% else %}sqlite:////opt/airflow/airflow.db{% endif %}
+      - AIRFLOW__CORE__FERNET_KEY={{ '${random_password.airflow_fernet_key.result}' }}
+      - AIRFLOW__CORE__SECRET_KEY={{ '${random_password.airflow_secret_key.result}' }}
       - AIRFLOW__CORE__LOAD_EXAMPLES=False
-      - AIRFLOW__API__SECRET_KEY=${local.airflow_secret_key}
+      - AIRFLOW__API__SECRET_KEY={{ '${random_password.airflow_secret_key.result}' }}
       - AIRFLOW__API__RBAC=True
       - AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION=True
-      - AIRFLOW__CORE__PARALLELISM={{ flags.airflow_params.get('airflow_parallelism', 32) }}
-      - AIRFLOW__CORE__DAG_CONCURRENCY={{ flags.airflow_params.get('airflow_dag_concurrency', 16) }}
-      - AIRFLOW__CORE__MAX_ACTIVE_RUNS_PER_DAG={{ flags.airflow_params.get('airflow_max_active_runs_per_dag', 16) }}
+      - AIRFLOW__CORE__PARALLELISM={{ flags.airflow_params.get('airflow_parallelism', 4) }}
+      - AIRFLOW__CORE__DAG_CONCURRENCY={{ flags.airflow_params.get('airflow_dag_concurrency', 2) }}
+      - AIRFLOW__CORE__MAX_ACTIVE_RUNS_PER_DAG={{ flags.airflow_params.get('airflow_max_active_runs_per_dag', 2) }}
+      - AIRFLOW__API__WORKERS={{ flags.airflow_params.get('airflow_webserver_workers', 2) }}
       - AIRFLOW__API__AUTHENTICATE=True
       - AIRFLOW__API__AUTH_BACKEND=airflow.auth.backend.basic_auth
-      - _AIRFLOW_WWW_USER_CREATE=true
-      - _AIRFLOW_WWW_USER_USERNAME={{ flags.airflow_params.get('airflow_admin_user', 'admin') }}
-      - _AIRFLOW_WWW_USER_PASSWORD={{ flags.airflow_params.get('airflow_admin_password', 'admin') }}
+      # DB migration and user creation are handled by airflow-init only
     volumes:
       - /opt/airflow:/opt/airflow
     networks:
@@ -820,25 +893,31 @@ services:
       - airflow-init
     command: ["airflow", "api-server"]
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
-      interval: 60s
-      timeout: 30s
-      retries: 5
-      start_period: 120s
+      test: ["CMD", "curl", "-f", "http://localhost:8080/"]  # Change from /health to /
+      interval: 120s
+      timeout: 60s
+      retries: 10
+      start_period: 300s
 
   airflow-scheduler:
     image: apache/airflow:3.0.4
     container_name: airflow-scheduler
     environment:
       - AIRFLOW__CORE__EXECUTOR={{ flags.airflow_params.get('airflow_executor', 'LocalExecutor') }}
-      - AIRFLOW__CORE__SQL_ALCHEMY_CONN=sqlite:////opt/airflow/airflow.db
-      - AIRFLOW__CORE__FERNET_KEY=${local.airflow_fernet_key}
-      - AIRFLOW__CORE__SECRET_KEY=${local.airflow_secret_key}
+      - AIRFLOW__DATABASE__SQL_ALCHEMY_CONN={% if flags.needs_airflow and flags.needs_postgres %}postgresql+psycopg2://{{ '${google_sql_user.airflow_user.name}' }}:{{ '${random_password.db_password.result}' }}@{{ '${google_sql_database_instance.postgres.public_ip_address}' }}:5432/{{ '${google_sql_database.airflow_db.name}' }}{% else %}sqlite:////opt/airflow/airflow.db{% endif %}
+      - AIRFLOW__CORE__FERNET_KEY={{ '${random_password.airflow_fernet_key.result}' }}
+      - AIRFLOW__CORE__SECRET_KEY={{ '${random_password.airflow_secret_key.result}' }}
       - AIRFLOW__CORE__LOAD_EXAMPLES=False
+      - AIRFLOW__API__SECRET_KEY={{ '${random_password.airflow_secret_key.result}' }}
+      - AIRFLOW__API__RBAC=True
       - AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION=True
-      - AIRFLOW__CORE__PARALLELISM={{ flags.airflow_params.get('airflow_parallelism', 32) }}
-      - AIRFLOW__CORE__DAG_CONCURRENCY={{ flags.airflow_params.get('airflow_dag_concurrency', 16) }}
-      - AIRFLOW__CORE__MAX_ACTIVE_RUNS_PER_DAG={{ flags.airflow_params.get('airflow_max_active_runs_per_dag', 16) }}
+      - AIRFLOW__CORE__PARALLELISM={{ flags.airflow_params.get('airflow_parallelism', 4) }}
+      - AIRFLOW__CORE__DAG_CONCURRENCY={{ flags.airflow_params.get('airflow_dag_concurrency', 2) }}
+      - AIRFLOW__CORE__MAX_ACTIVE_RUNS_PER_DAG={{ flags.airflow_params.get('airflow_max_active_runs_per_dag', 2) }}
+      - AIRFLOW__API__WORKERS={{ flags.airflow_params.get('airflow_webserver_workers', 2) }}
+      - AIRFLOW__API__AUTHENTICATE=True
+      - AIRFLOW__API__AUTH_BACKEND=airflow.auth.backend.basic_auth
+      # DB migration and user creation are handled by airflow-init only
     volumes:
       - /opt/airflow:/opt/airflow
     networks:
@@ -848,21 +927,30 @@ services:
       - airflow-init
     command: ["airflow", "scheduler"]
     healthcheck:
-      test: ["CMD", "airflow", "jobs", "check", "--job-type", "SchedulerJob", "--hostname", "$$(hostname)"]
-      interval: 60s
-      timeout: 30s
-      retries: 5
-      start_period: 120s
+      test: ["CMD", "airflow", "version"]
+      interval: 120s
+      timeout: 60s
+      retries: 10
+      start_period: 300s
 
   airflow-init:
     image: apache/airflow:3.0.4
     container_name: airflow-init
     environment:
       - AIRFLOW__CORE__EXECUTOR={{ flags.airflow_params.get('airflow_executor', 'LocalExecutor') }}
-      - AIRFLOW__CORE__SQL_ALCHEMY_CONN=sqlite:////opt/airflow/airflow.db
-      - AIRFLOW__CORE__FERNET_KEY=${local.airflow_fernet_key}
-      - AIRFLOW__CORE__SECRET_KEY=${local.airflow_secret_key}
+      - AIRFLOW__DATABASE__SQL_ALCHEMY_CONN={% if flags.needs_airflow and flags.needs_postgres %}postgresql+psycopg2://{{ '${google_sql_user.airflow_user.name}' }}:{{ '${random_password.db_password.result}' }}@{{ '${google_sql_database_instance.postgres.public_ip_address}' }}:5432/{{ '${google_sql_database.airflow_db.name}' }}{% else %}sqlite:////opt/airflow/airflow.db{% endif %}
+      - AIRFLOW__CORE__FERNET_KEY={{ '${random_password.airflow_fernet_key.result}' }}
+      - AIRFLOW__CORE__SECRET_KEY={{ '${random_password.airflow_secret_key.result}' }}
       - AIRFLOW__CORE__LOAD_EXAMPLES=False
+      - AIRFLOW__API__SECRET_KEY={{ '${random_password.airflow_secret_key.result}' }}
+      - AIRFLOW__API__RBAC=True
+      - AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION=True
+      - AIRFLOW__CORE__PARALLELISM={{ flags.airflow_params.get('airflow_parallelism', 4) }}
+      - AIRFLOW__CORE__DAG_CONCURRENCY={{ flags.airflow_params.get('airflow_dag_concurrency', 2) }}
+      - AIRFLOW__CORE__MAX_ACTIVE_RUNS_PER_DAG={{ flags.airflow_params.get('airflow_max_active_runs_per_dag', 2) }}
+      - AIRFLOW__API__WORKERS={{ flags.airflow_params.get('airflow_webserver_workers', 2) }}
+      - AIRFLOW__API__AUTHENTICATE=True
+      - AIRFLOW__API__AUTH_BACKEND=airflow.auth.backend.basic_auth
       - _AIRFLOW_DB_MIGRATE=true
       - _AIRFLOW_WWW_USER_CREATE=true
       - _AIRFLOW_WWW_USER_USERNAME={{ flags.airflow_params.get('airflow_admin_user', 'admin') }}
@@ -872,10 +960,8 @@ services:
     networks:
       - mlflow-network
     restart: "no"
-    depends_on:
-      mlflow:
-        condition: service_healthy
-    command: ["airflow", "db", "migrate"]
+    depends_on: []
+    command: ["sh", "-c", "airflow db migrate && airflow users create --username {{ flags.airflow_params.get('airflow_admin_user', 'admin') }} --firstname Admin --lastname User --role Admin --email admin@example.com --password {{ flags.airflow_params.get('airflow_admin_password', 'admin') }}"]
 {% endif %}
 
 volumes:
@@ -891,6 +977,9 @@ networks:
   mlflow-network:
     driver: bridge
 DOCKER_COMPOSE_EOF
+
+    echo "✅ Docker Compose file created at /home/$CURRENT_USER/deployml/docker/docker-compose.yml"
+    echo "📁 File size: $(wc -c < /home/$CURRENT_USER/deployml/docker/docker-compose.yml) bytes"
 
     # Create MLflow Dockerfile
     echo "Creating MLflow Dockerfile..."
@@ -2000,24 +2089,24 @@ RemainAfterExit=true
 User=$CURRENT_USER
 Group=$CURRENT_USER
 WorkingDirectory=/home/$CURRENT_USER/deployml/docker
-Environment=MLFLOW_BACKEND_STORE_URI=${local.backend_store_uri}
+Environment=MLFLOW_BACKEND_STORE_URI={% if flags.needs_postgres %}postgresql+psycopg2://{{ flags.first_tool_name }}:{{ '${random_password.db_password.result}' }}@{{ '${google_sql_database_instance.postgres.public_ip_address}' }}:5432/{{ '${google_sql_database.db.name}' }}{% else %}sqlite:///mlflow.db{% endif %}
 Environment=MLFLOW_DEFAULT_ARTIFACT_ROOT={% if flags.mlflow_params.get('artifact_bucket') %}gs://{{ flags.mlflow_params.artifact_bucket }}{% else %}./mlflow-artifacts{% endif %}
 {% if flags.needs_feast and flags.needs_postgres %}
 # FEAST PostgreSQL environment variables for Docker Compose
 Environment=FEAST_REGISTRY_TYPE=sql
-Environment=FEAST_REGISTRY_PATH=${local.feast_registry_uri}
-Environment=FEAST_ONLINE_STORE_TYPE=postgres
-Environment=FEAST_ONLINE_STORE_HOST=${local.feast_postgres_host}
-Environment=FEAST_ONLINE_STORE_PORT=${local.feast_postgres_port}
-Environment=FEAST_ONLINE_STORE_DATABASE=${local.feast_postgres_database}
-Environment=FEAST_ONLINE_STORE_USER=${local.feast_postgres_user}
-Environment=FEAST_ONLINE_STORE_PASSWORD=${local.feast_postgres_password}
+Environment=FEAST_REGISTRY_PATH={% if flags.needs_postgres %}postgresql+psycopg2://{{ '${var.feast_database_user}' }}:{{ '${random_password.db_password.result}' }}@{{ '${google_sql_database_instance.postgres.public_ip_address}' }}:5432/{{ '${var.feast_database_name}' }}{% else %}data/registry.db{% endif %}
+Environment=FEAST_ONLINE_STORE_TYPE={% if flags.needs_postgres %}postgres{% else %}sqlite{% endif %}
+Environment=FEAST_ONLINE_STORE_HOST={% if flags.needs_postgres %}{{ '${google_sql_database_instance.postgres.public_ip_address}' }}{% else %}localhost{% endif %}
+Environment=FEAST_ONLINE_STORE_PORT={% if flags.needs_postgres %}5432{% else %}3306{% endif %}
+Environment=FEAST_ONLINE_STORE_DATABASE={% if flags.needs_postgres %}{{ '${var.feast_database_name}' }}{% else %}feast_offline{% endif %}
+Environment=FEAST_ONLINE_STORE_USER={% if flags.needs_postgres %}{{ '${var.feast_database_user}' }}{% else %}feast{% endif %}
+Environment=FEAST_ONLINE_STORE_PASSWORD={% if flags.needs_postgres %}{{ '${random_password.db_password.result}' }}{% else %}feast{% endif %}
 Environment=FEAST_OFFLINE_STORE_TYPE=bigquery
 Environment=FEAST_OFFLINE_STORE_PROJECT={{ project_id }}
 Environment=FEAST_OFFLINE_STORE_DATASET={{ flags.feast_params.get('bigquery_dataset', 'feast_offline_store') }}
 Environment=FEAST_ARTIFACT_BUCKET={{ flags.mlflow_params.get('artifact_bucket', '') }}
 Environment=GOOGLE_CLOUD_PROJECT={{ project_id }}
-Environment=USE_POSTGRES=true
+Environment=USE_POSTGRES={% if flags.needs_postgres %}true{% else %}false{% endif %}
 Environment=FEAST_PORT={{ flags.feast_params.get('feast_port', 6566) }}
 {% endif %}
 
@@ -2215,6 +2304,23 @@ ENV_EOF
     {% if flags.mlflow_params.get('artifact_bucket') %}
     echo "Artifact store: gs://{{ flags.mlflow_params.artifact_bucket }}"
     {% endif %}
+    
+    # Final verification of created files
+    echo "🔍 Final verification of created files..."
+    echo "📁 Checking /home/$CURRENT_USER/deployml/docker/ directory:"
+    ls -la /home/$CURRENT_USER/deployml/docker/ || echo "❌ Directory listing failed"
+    
+    if [ -f "/home/$CURRENT_USER/deployml/docker/docker-compose.yml" ]; then
+        echo "✅ docker-compose.yml exists"
+    else
+        echo "❌ docker-compose.yml missing!"
+    fi
+    
+    if [ -f "/home/$CURRENT_USER/deployml/docker/airflow_environment.env" ]; then
+        echo "✅ airflow_environment.env exists"
+    else
+        echo "❌ airflow_environment.env missing!"
+    fi
     
     echo "$(date): VM setup completed successfully!"
     echo "Startup script completed successfully" | sudo tee /var/log/mlflow-startup-complete.log
@@ -2457,9 +2563,9 @@ output "airflow_deployment_info" {
     executor = "{{ flags.airflow_params.get('airflow_executor', 'LocalExecutor') }}"
     admin_user = "{{ flags.airflow_params.get('airflow_admin_user', 'admin') }}"
     admin_password = "{{ flags.airflow_params.get('airflow_admin_password', 'admin') }}"
-    parallelism = {{ flags.airflow_params.get('airflow_parallelism', 32) }}
-    dag_concurrency = {{ flags.airflow_params.get('airflow_dag_concurrency', 16) }}
-    max_active_runs_per_dag = {{ flags.airflow_params.get('airflow_max_active_runs_per_dag', 16) }}
+    parallelism = {{ flags.airflow_params.get('airflow_parallelism', 4) }}
+    dag_concurrency = {{ flags.airflow_params.get('airflow_dag_concurrency', 2) }}
+    max_active_runs_per_dag = {{ flags.airflow_params.get('airflow_max_active_runs_per_dag', 2) }}
     deployment_type = "vm"
   }
   description = "Airflow deployment configuration and information"
