@@ -71,7 +71,7 @@ module "{{ stage_name }}_{{ tool.name }}" {
   region     = var.region
   
   # Control what gets created based on the module purpose
-  create_service = {% if stage_name in ["experiment_tracking", "model_serving", "feature_store", "offline_scoring"] %}true{% else %}false{% endif %}
+  create_service = {% if stage_name in ["experiment_tracking", "model_serving", "feature_store", "workflow_orchestration"] %}true{% else %}false{% endif %}
   allow_public_access = var.allow_public_access
   
   # Resource configuration
@@ -182,8 +182,92 @@ module "{{ stage_name }}_{{ tool.name }}" {
   {% endfor %}
 {% endfor %}
 
+# Workflow orchestration (cron scheduling) module
 {% for stage in stack %}
   {% for stage_name, tool in stage.items() %}
+    {% if stage_name == "workflow_orchestration" and tool.name == "cron" %}
+module "{{ stage_name }}_{{ tool.name }}" {
+  source = "./modules/{{ tool.name }}/cloud/{{ cloud }}/{{ deployment_type }}"
+  
+  project_id = var.project_id
+  region     = var.region
+  
+  jobs = [
+    {% for job in tool.params.jobs %}
+    {
+      service_name     = "{{ job.service_name }}"
+      image           = "{{ job.image }}"
+      cron_schedule   = "{{ job.cron_schedule }}"
+      {% if job.get("bigquery_dataset") %}
+      bigquery_dataset = "{{ job.bigquery_dataset }}"
+      {% endif %}
+    }{% if not loop.last %},{% endif %}
+    {% endfor %}
+  ]
+  
+  # MLflow configuration
+  {% set has_mlflow_tracking = false %}
+  {% for s in stack %}
+    {% for sn, t in s.items() %}
+      {% if sn == "experiment_tracking" and t.name == "mlflow" %}
+        {% set has_mlflow_tracking = true %}
+      {% endif %}
+    {% endfor %}
+  {% endfor %}
+  {% if has_mlflow_tracking %}
+  mlflow_tracking_uri = length(module.experiment_tracking_mlflow) > 0 ? module.experiment_tracking_mlflow[0].service_url : ""
+  {% endif %}
+  
+  # Database configuration
+  {% if flags.needs_postgres %}
+  database_url = module.cloud_sql_postgres.connection_string
+  feast_online_store_host = module.cloud_sql_postgres.db_public_ip
+  feast_online_store_port = "5432"
+  feast_online_store_database = "feast"
+  feast_online_store_user = module.cloud_sql_postgres.db_user
+  feast_online_store_password = module.cloud_sql_postgres.db_password
+  feast_registry_path = module.cloud_sql_postgres.feast_connection_string_cloud_sql
+  {% endif %}
+  
+  # Grafana configuration for drift monitoring
+  {% set has_grafana = false %}
+  {% for s in stack %}
+    {% for sn, t in s.items() %}
+      {% if sn == "model_monitoring" and t.name == "grafana" %}
+        {% set has_grafana = true %}
+      {% endif %}
+    {% endfor %}
+  {% endfor %}
+  {% if has_grafana %}
+  grafana_url = length(module.model_monitoring_grafana) > 0 ? module.model_monitoring_grafana[0].service_url : ""
+  {% endif %}
+  
+  depends_on = [
+    {% if has_mlflow_tracking %}module.experiment_tracking_mlflow,{% endif %}
+    {% if flags.needs_postgres %}module.cloud_sql_postgres,{% endif %}
+    {% if has_grafana %}module.model_monitoring_grafana{% endif %}
+  ]
+}
+    {% endif %}
+  {% endfor %}
+{% endfor %}
+
+{% for stage in stack %}
+  {% for stage_name, tool in stage.items() %}
+    {% if stage_name == "workflow_orchestration" and tool.name == "cron" %}
+# Workflow orchestration outputs
+output "{{ stage_name }}_{{ tool.name }}_job_names" {
+  value = length(module.{{ stage_name }}_{{ tool.name }}) > 0 ? module.{{ stage_name }}_{{ tool.name }}[0].job_names : []
+}
+
+output "{{ stage_name }}_{{ tool.name }}_scheduler_jobs" {
+  value = length(module.{{ stage_name }}_{{ tool.name }}) > 0 ? module.{{ stage_name }}_{{ tool.name }}[0].scheduler_job_names : []
+}
+
+output "{{ stage_name }}_{{ tool.name }}_jobs_summary" {
+  value = length(module.{{ stage_name }}_{{ tool.name }}) > 0 ? module.{{ stage_name }}_{{ tool.name }}[0].jobs_summary : {}
+}
+    {% else %}
 output "{{ stage_name }}_{{ tool.name }}_url" {
   value = var.enable_{{ stage_name }}_{{ tool.name }} && length(module.{{ stage_name }}_{{ tool.name }}) > 0 ? module.{{ stage_name }}_{{ tool.name }}[0].service_url : ""
 }
@@ -191,6 +275,7 @@ output "{{ stage_name }}_{{ tool.name }}_url" {
 output "{{ stage_name }}_{{ tool.name }}_bucket" {
   value = var.enable_{{ stage_name }}_{{ tool.name }} && length(module.{{ stage_name }}_{{ tool.name }}) > 0 ? module.{{ stage_name }}_{{ tool.name }}[0].bucket_name : ""
 }
+    {% endif %}
   {% endfor %}
 {% endfor %}
 

@@ -197,71 +197,67 @@ module "{{ stage_name }}_{{ tool.name }}" {
   {% endfor %}
 {% endfor %}
 
-# Optional: Offline scoring module, only if present in stack
+# Workflow orchestration for multiple cron jobs (offline_scoring, drift_monitoring)
 {% for stage in stack %}
   {% for stage_name, tool in stage.items() %}
-    {% if stage_name == "offline_scoring" %}
+    {% if stage_name == "workflow_orchestration" and tool.name == "cron" %}
 module "{{ stage_name }}_{{ tool.name }}" {
-  source              = "./modules/{{ tool.name }}/cloud/gcp/cloud_run"
-  count               = var.enable_{{ stage_name }}_{{ tool.name }} && var.{{ stage_name }}_{{ tool.name }}_service_name != "" ? 1 : 0
-  project_id          = var.project_id
-  region              = var.region
-  service_name        = var.{{ stage_name }}_{{ tool.name }}_service_name
-  image               = var.{{ stage_name }}_{{ tool.name }}_image
-  cpu_limit           = var.cpu_limit
-  memory_limit        = var.memory_limit
-  allow_public_access = var.allow_public_access
-  create_service      = true
+  source = "./modules/cron/cloud/gcp/cloud_run"
   
-  # Pass through only the parameters that are explicitly provided
-  {% for key, value in tool.params.items() %}
-    {% if key == "bigquery_dataset" %}
-  bigquery_dataset = var.{{ stage_name }}_bigquery_dataset
-    {% elif key not in ["image", "service_name", "backend_store_uri"] %}
-  {{ key }} = {% if value is string %}"{{ value }}"{% else %}{{ value }}{% endif %}
-    {% endif %}
-  {% endfor %}
+  project_id = var.project_id
+  region     = var.region
   
-  # Database connection for storing predictions
+  jobs = [
+    {% for job in tool.params.jobs %}
+    {
+      service_name     = "{{ job.service_name }}"
+      image           = "{{ job.image }}"
+      cron_schedule   = "{{ job.cron_schedule }}"
+      {% if job.get("bigquery_dataset") %}
+      bigquery_dataset = "{{ job.bigquery_dataset }}"
+      {% endif %}
+    }{% if not loop.last %},{% endif %}
+    {% endfor %}
+  ]
+  
+  # MLflow configuration - connect to experiment tracking
+  mlflow_tracking_uri = length(module.experiment_tracking_mlflow) > 0 ? module.experiment_tracking_mlflow[0].service_url : ""
+  
+  # Database and Feast configuration
   {% if flags.needs_postgres %}
   database_url = module.cloud_sql_postgres.metrics_connection_string
-  cloudsql_instance_annotation = module.cloud_sql_postgres.instance_connection_name
-  
-  # Feast online store PostgreSQL connection details
   feast_online_store_host = module.cloud_sql_postgres.postgres_host
   feast_online_store_port = module.cloud_sql_postgres.postgres_port
   feast_online_store_database = module.cloud_sql_postgres.postgres_database
   feast_online_store_user = module.cloud_sql_postgres.postgres_user
   feast_online_store_password = module.cloud_sql_postgres.postgres_password
-  
-  # Feast registry path (PostgreSQL connection for registry)
   feast_registry_path = module.cloud_sql_postgres.feast_connection_string
-  {% else %}
-  database_url = ""
-  cloudsql_instance_annotation = ""
-  
-  # Empty Feast online store configuration when no PostgreSQL
-  feast_online_store_host = ""
-  feast_online_store_port = ""
-  feast_online_store_database = ""
-  feast_online_store_user = ""
-  feast_online_store_password = ""
-  feast_registry_path = ""
   {% endif %}
   
-  # MLflow tracking URI from experiment_tracking module - direct reference
-  mlflow_tracking_uri = length(module.experiment_tracking_mlflow) > 0 ? module.experiment_tracking_mlflow[0].service_url : ""
+  # Grafana configuration for drift monitoring - check if grafana exists in stack
+  {% set has_grafana = false %}
+  {% for s in stack %}
+    {% for sn, t in s.items() %}
+      {% if sn == "model_monitoring" and t.name == "grafana" %}
+        {% set has_grafana = true %}
+      {% endif %}
+    {% endfor %}
+  {% endfor %}
+  {% if has_grafana %}
+  grafana_url = length(module.model_monitoring_grafana) > 0 ? module.model_monitoring_grafana[0].service_url : ""
+  {% endif %}
   
-  # Direct dependencies on all required modules
   depends_on = [
-    module.cloud_sql_postgres,
+    {% if flags.needs_postgres %}module.cloud_sql_postgres,{% endif %}
     module.experiment_tracking_mlflow,
-    module.feature_store_feast
+    module.feature_store_feast{% if has_grafana %},
+    module.model_monitoring_grafana{% endif %}
   ]
 }
     {% endif %}
   {% endfor %}
 {% endfor %}
+
 
 # Optional: Grafana monitoring module, only if present in stack
 {% for stage in stack %}
@@ -360,18 +356,23 @@ output "{{ stage_name }}_{{ tool.name }}_url" {
   {% endfor %}
 {% endfor %}
 
-# Output for Offline scoring if present
+# Output for Workflow orchestration (cron jobs) if present
 {% for stage in stack %}
   {% for stage_name, tool in stage.items() %}
-    {% if stage_name == "offline_scoring" %}
-output "{{ stage_name }}_{{ tool.name }}_job_name" {
-  value = length(module.{{ stage_name }}_{{ tool.name }}) > 0 ? module.{{ stage_name }}_{{ tool.name }}[0].job_name : ""
+    {% if stage_name == "workflow_orchestration" and tool.name == "cron" %}
+output "{{ stage_name }}_{{ tool.name }}_job_names" {
+  value = module.{{ stage_name }}_{{ tool.name }}.job_names
 }
 
-output "{{ stage_name }}_{{ tool.name }}_scheduler_job" {
-  value = length(module.{{ stage_name }}_{{ tool.name }}) > 0 ? module.{{ stage_name }}_{{ tool.name }}[0].scheduler_job_name : ""
+output "{{ stage_name }}_{{ tool.name }}_scheduler_jobs" {
+  value = module.{{ stage_name }}_{{ tool.name }}.scheduler_job_names
+}
+
+output "{{ stage_name }}_{{ tool.name }}_jobs_summary" {
+  value = module.{{ stage_name }}_{{ tool.name }}.jobs_summary
 }
     {% endif %}
   {% endfor %}
 {% endfor %}
+
 {% endblock %} 
