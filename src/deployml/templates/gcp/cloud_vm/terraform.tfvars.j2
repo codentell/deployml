@@ -19,7 +19,7 @@ enable_{{ stage_name }}_{{ tool.name }} = true
     {% for key, value in tool.params.items() %}
       {% if key not in seen %}
         {%- set _ = seen.append(key) -%}
-        {% if key in ["create_service", "create_bucket", "allow_public_access", "allow_http_https", "enable_https", "use_postgres", "create_bigquery_dataset", "sample_data", "enable_grafana", "airflow_separate_database"] %}
+        {% if key in ["create_service", "create_bucket", "create_artifact_bucket", "allow_public_access", "allow_http_https", "enable_https", "use_postgres", "create_bigquery_dataset", "sample_data", "enable_grafana", "airflow_separate_database"] %}
 {{ key }} = {{ "true" if value else "false" }}
         {% elif key in ["disk_size_gb", "mlflow_port", "fastapi_port", "feast_port", "grafana_port", "airflow_port", "airflow_worker_port", "airflow_flower_port", "airflow_parallelism", "airflow_dag_concurrency", "airflow_max_active_runs_per_dag"] %}
 {{ key }} = {{ value }}
@@ -43,8 +43,7 @@ create_service = true
 create_bucket = false
 {% endif %}
 
-# Add create_artifact_bucket variable for template logic
-create_artifact_bucket = {{ create_artifact_bucket | lower }}
+# create_artifact_bucket is handled by dynamic parameter assignment from YAML
 {% if "service_name" not in seen %}
 service_name = "mlflow-server"
 {% endif %}

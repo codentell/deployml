@@ -51,24 +51,27 @@
 # - FastAPI depends on MLflow being healthy
 # - All services depend on PostgreSQL being ready
 
-{% if create_artifact_bucket %}
-{% for stage in stack %}
-  {% for stage_name, tool in stage.items() %}
-    {% if tool.params.get("artifact_bucket") %}
-resource "google_storage_bucket" "{{ stage_name }}_{{ tool.name }}_artifact" {
-  name          = var.artifact_bucket
+# --- UNIFIED BUCKET CREATION ---
+# Create buckets based on structured configuration from CLI
+{% if bucket_configs %}
+# Creating buckets based on unified configuration...
+{% for config in bucket_configs %}
+# Bucket for {{ config.stage }}/{{ config.tool }}
+resource "google_storage_bucket" "{{ config.stage }}_{{ config.tool }}_artifact" {
+  name          = "{{ config.bucket_name }}"
   location      = var.region
   force_destroy = true
+  count         = {{ config.create | lower }} ? 1 : 0
 
   labels = {
-    component  = "{{ tool.name }}-artifacts"
+    component  = "{{ config.tool }}-artifacts"
     managed-by = "terraform"
-    stage      = "{{ stage_name }}"
+    stage      = "{{ config.stage }}"
   }
 }
-    {% endif %}
-  {% endfor %}
 {% endfor %}
+{% else %}
+# No bucket configurations found
 {% endif %}
 
 provider "google" {
@@ -296,21 +299,8 @@ resource "google_sql_user" "airflow_user" {
 # 3. Then retry terraform destroy
 {% endif %}
 
-# Storage bucket - only create if explicitly requested
-resource "google_storage_bucket" "artifact" {
-  count         = var.create_artifact_bucket && var.artifact_bucket != "" ? 1 : 0
-  name          = var.artifact_bucket
-  location      = var.region
-  force_destroy = true
-  
-  # Explicit dependency to ensure APIs are ready FIRST
-  depends_on = [null_resource.api_readiness_check]
-  
-  labels = {
-    component  = "mlflow-artifacts"
-    managed-by = "terraform"
-  }
-}
+# Main artifact bucket is now handled by stage-specific buckets above
+# This ensures consistent bucket naming and avoids conflicts
 
 # Create a service account for the VM
 resource "google_service_account" "vm_service_account" {
@@ -323,9 +313,8 @@ resource "google_service_account" "vm_service_account" {
 }
 
 # Project-level IAM bindings for the service account (these will show up in the IAM UI)
-{% for stage in stack %}
-  {% for stage_name, tool in stage.items() %}
-    {% if tool.name == "mlflow" and tool.params.get("artifact_bucket") %}
+{% if bucket_configs %}
+# Grant storage permissions if any buckets are configured
 resource "google_project_iam_member" "vm_service_account_storage_admin" {
   project    = var.project_id
   role       = "roles/storage.objectAdmin"
@@ -339,9 +328,7 @@ resource "google_project_iam_member" "vm_service_account_storage_viewer" {
   member     = "serviceAccount:${google_service_account.vm_service_account.email}"
   depends_on = [google_service_account.vm_service_account, null_resource.api_readiness_check]
 }
-    {% endif %}
-  {% endfor %}
-{% endfor %}
+{% endif %}
 
 # Additional useful permissions for the VM service account
 resource "google_project_iam_member" "vm_service_account_logging" {
@@ -665,7 +652,7 @@ FEAST_ONLINE_STORE_PASSWORD={{ '${random_password.db_password.result}' }}
 FEAST_OFFLINE_STORE_TYPE=bigquery
 FEAST_OFFLINE_STORE_PROJECT={{ project_id }}
 FEAST_OFFLINE_STORE_DATASET={{ flags.feast_params.get('bigquery_dataset', 'feast_offline_store') }}
-FEAST_ARTIFACT_BUCKET={{ flags.mlflow_params.get('artifact_bucket', '') }}
+FEAST_ARTIFACT_BUCKET={% if bucket_configs %}{% for config in bucket_configs %}{% if config.create %}{{ config.bucket_name }}{% endif %}{% endfor %}{% else %}{% endif %}
 GOOGLE_CLOUD_PROJECT={{ project_id }}
 USE_POSTGRES={{ 'true' if flags.needs_postgres else 'false' }}
 FEAST_PORT={{ flags.feast_params.get('feast_port', 6566) }}
@@ -773,7 +760,7 @@ services:
       - "{{ flags.mlflow_params.mlflow_port }}:5000"
     environment:
       - MLFLOW_BACKEND_STORE_URI={% if flags.needs_postgres %}postgresql+psycopg2://{{ flags.first_tool_name }}:{{ '${random_password.db_password.result}' }}@{{ '${google_sql_database_instance.postgres.public_ip_address}' }}:5432/{{ '${google_sql_database.db.name}' }}{% else %}sqlite:///mlflow.db{% endif %}
-      - MLFLOW_DEFAULT_ARTIFACT_ROOT={% if flags.mlflow_params.get('artifact_bucket') %}gs://{{ flags.mlflow_params.artifact_bucket }}{% else %}./mlflow-artifacts{% endif %}
+      - MLFLOW_DEFAULT_ARTIFACT_ROOT={% if bucket_configs %}{% for config in bucket_configs %}{% if config.create %}gs://{{ config.bucket_name }}{% endif %}{% endfor %}{% else %}./mlflow-artifacts{% endif %}
       - MLFLOW_SERVER_HOST=0.0.0.0
       - MLFLOW_SERVER_PORT=5000
     volumes:
@@ -784,7 +771,7 @@ services:
     restart: unless-stopped
     # Wait for PostgreSQL to be ready before starting MLflow (when using PostgreSQL)
     entrypoint: ["/bin/bash"]
-    command: ["-c", "{% if flags.needs_postgres %}echo 'Waiting for PostgreSQL to be ready...' && until pg_isready -h {{ '${google_sql_database_instance.postgres.public_ip_address}' }} -p 5432 -U {{ flags.first_tool_name }}; do echo 'PostgreSQL not ready yet, waiting...' && sleep 5; done && echo 'PostgreSQL is ready! Starting MLflow...' && {% endif %}mlflow server --host 0.0.0.0 --port 5000 --backend-store-uri {% if flags.needs_postgres %}postgresql+psycopg2://{{ flags.first_tool_name }}:{{ '${random_password.db_password.result}' }}@{{ '${google_sql_database_instance.postgres.public_ip_address}' }}:5432/{{ '${google_sql_database.db.name}' }}{% else %}sqlite:///mlflow.db{% endif %} --default-artifact-root {% if flags.mlflow_params.get('artifact_bucket') %}gs://{{ flags.mlflow_params.artifact_bucket }}{% else %}./mlflow-artifacts{% endif %}"]
+    command: ["-c", "{% if flags.needs_postgres %}echo 'Waiting for PostgreSQL to be ready...' && until pg_isready -h {{ '${google_sql_database_instance.postgres.public_ip_address}' }} -p 5432 -U {{ flags.first_tool_name }}; do echo 'PostgreSQL not ready yet, waiting...' && sleep 5; done && echo 'PostgreSQL is ready! Starting MLflow...' && {% endif %}mlflow server --host 0.0.0.0 --port 5000 --backend-store-uri {% if flags.needs_postgres %}postgresql+psycopg2://{{ flags.first_tool_name }}:{{ '${random_password.db_password.result}' }}@{{ '${google_sql_database_instance.postgres.public_ip_address}' }}:5432/{{ '${google_sql_database.db.name}' }}{% else %}sqlite:///mlflow.db{% endif %} --default-artifact-root {% if bucket_configs %}{% for config in bucket_configs %}{% if config.create %}gs://{{ config.bucket_name }}{% endif %}{% endfor %}{% else %}./mlflow-artifacts{% endif %}"]
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
       interval: 30s
@@ -2097,7 +2084,7 @@ User=$CURRENT_USER
 Group=$CURRENT_USER
 WorkingDirectory=/home/$CURRENT_USER/deployml/docker
 Environment=MLFLOW_BACKEND_STORE_URI={% if flags.needs_postgres %}postgresql+psycopg2://{{ flags.first_tool_name }}:{{ '${random_password.db_password.result}' }}@{{ '${google_sql_database_instance.postgres.public_ip_address}' }}:5432/{{ '${google_sql_database.db.name}' }}{% else %}sqlite:///mlflow.db{% endif %}
-Environment=MLFLOW_DEFAULT_ARTIFACT_ROOT={% if flags.mlflow_params.get('artifact_bucket') %}gs://{{ flags.mlflow_params.artifact_bucket }}{% else %}./mlflow-artifacts{% endif %}
+Environment=MLFLOW_DEFAULT_ARTIFACT_ROOT={% if bucket_configs %}{% for config in bucket_configs %}{% if config.create %}gs://{{ config.bucket_name }}{% endif %}{% endfor %}{% else %}./mlflow-artifacts{% endif %}
 {% if flags.needs_feast and flags.needs_postgres %}
 # FEAST PostgreSQL environment variables for Docker Compose
 Environment=FEAST_REGISTRY_TYPE=sql
@@ -2111,7 +2098,7 @@ Environment=FEAST_ONLINE_STORE_PASSWORD={% if flags.needs_postgres %}{{ '${rando
 Environment=FEAST_OFFLINE_STORE_TYPE=bigquery
 Environment=FEAST_OFFLINE_STORE_PROJECT={{ project_id }}
 Environment=FEAST_OFFLINE_STORE_DATASET={{ flags.feast_params.get('bigquery_dataset', 'feast_offline_store') }}
-Environment=FEAST_ARTIFACT_BUCKET={{ flags.mlflow_params.get('artifact_bucket', '') }}
+Environment=FEAST_ARTIFACT_BUCKET={% if bucket_configs %}{% for config in bucket_configs %}{% if config.create %}{{ config.bucket_name }}{% endif %}{% endfor %}{% else %}{% endif %}
 Environment=GOOGLE_CLOUD_PROJECT={{ project_id }}
 Environment=USE_POSTGRES={% if flags.needs_postgres %}true{% else %}false{% endif %}
 Environment=FEAST_PORT={{ flags.feast_params.get('feast_port', 6566) }}
@@ -2308,8 +2295,12 @@ ENV_EOF
     echo "🐳 Manage containers: docker ps, docker logs mlflow-server, docker logs fastapi-proxy{% if flags.needs_feast %}, docker logs feast-server{% endif %}{% if flags.needs_airflow %}, docker logs airflow-webserver, docker logs airflow-scheduler{% endif %}"
     echo "🔧 Docker Compose: docker compose up -d, docker compose down, docker compose restart"
     echo "Backend store: {{ 'PostgreSQL' if flags.needs_postgres else 'SQLite' }}"
-    {% if flags.mlflow_params.get('artifact_bucket') %}
-    echo "Artifact store: gs://{{ flags.mlflow_params.artifact_bucket }}"
+    {% if bucket_configs %}
+    {% for config in bucket_configs %}
+    {% if config.create %}
+    echo "Artifact store: gs://{{ config.bucket_name }}"
+    {% endif %}
+    {% endfor %}
     {% endif %}
     
     # Final verification of created files
@@ -2605,20 +2596,25 @@ output "ssh_command" {
 }
 
 # Artifact bucket output  
-{% if flags.mlflow_params.get("artifact_bucket") %}
-output "bucket_name" {
-  value = "{{ flags.mlflow_params.artifact_bucket }}"
+{% if bucket_configs %}
+{% for config in bucket_configs %}
+output "bucket_name_{{ config.stage }}" {
+  value = "{{ config.bucket_name }}"
+  description = "Name of the {{ config.stage }} artifact bucket"
 }
 
-output "bucket_created" {
-  value = var.create_artifact_bucket
-  description = "Whether the artifact bucket was created by Terraform"
+output "bucket_created_{{ config.stage }}" {
+  value = {{ config.create | lower }}
+  description = "Whether the {{ config.stage }} artifact bucket was created by Terraform"
 }
 
-output "bucket_resource" {
-  value = var.create_artifact_bucket ? google_storage_bucket.artifact[0].name : "No bucket created"
-  description = "Name of the created bucket resource (if any)"
+output "bucket_resource_{{ config.stage }}" {
+  value = {{ config.create | lower }} ? google_storage_bucket.{{ config.stage }}_{{ config.tool }}_artifact[0].name : "No bucket created"
+  description = "Name of the created {{ config.stage }} bucket resource (if any)"
 }
+{% endfor %}
+{% else %}
+# No bucket configurations found
 {% endif %}
 
 # Zone output
@@ -2637,14 +2633,15 @@ output "iam_debug_info" {
   value = {
     service_account_id = google_service_account.vm_service_account.account_id
     project_id         = var.project_id
-    {% for stage in stack %}
-      {% for stage_name, tool in stage.items() %}
-        {% if tool.name == "mlflow" and tool.params.get("artifact_bucket") %}
-    artifact_bucket    = "{{ tool.params.artifact_bucket }}"
-    iam_bindings_created = "yes - storage permissions applied"
-        {% endif %}
-      {% endfor %}
+    {% if bucket_configs %}
+    {% for config in bucket_configs %}
+    artifact_bucket_{{ config.stage }} = "{{ config.bucket_name }}"
+    iam_bindings_created_{{ config.stage }} = "yes - storage permissions applied"
     {% endfor %}
+    {% else %}
+    artifact_buckets = "none configured"
+    iam_bindings_created = "no storage permissions needed"
+    {% endif %}
   }
 }
 
@@ -2658,7 +2655,7 @@ module "{{ stage_name }}_{{ tool.name }}" {
   region              = var.region
   bigquery_dataset    = var.bigquery_dataset
   create_bigquery_dataset = var.create_bigquery_dataset
-  artifact_bucket     = {% if create_artifact_bucket %}google_storage_bucket.artifact_tracking_mlflow_artifact.name{% else %}var.artifact_bucket{% endif %}
+  artifact_bucket     = {% if bucket_configs %}{% for config in bucket_configs %}{% if config.create %}google_storage_bucket.{{ config.stage }}_{{ config.tool }}_artifact[0].name{% endif %}{% endfor %}{% else %}""{% endif %}
   feast_port         = var.feast_port
   feast_database_name = var.feast_database_name
   feast_database_user = var.feast_database_user
