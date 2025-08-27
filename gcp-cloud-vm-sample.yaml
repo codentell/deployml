@@ -33,7 +33,7 @@ stack:
       params: 
         # artifact_bucket: mlflow-artifact-bucket-vm-54321
         artifact_bucket: mlflow-artifact-bucket-postgres-12345 # for postgres backend
-        create_bucket: true
+        create_artifact_bucket: true
   - model_registry:
       name: mlflow
       params: 

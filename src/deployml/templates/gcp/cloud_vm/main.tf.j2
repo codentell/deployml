@@ -298,7 +298,7 @@ resource "google_sql_user" "airflow_user" {
 
 # Storage bucket - only create if explicitly requested
 resource "google_storage_bucket" "artifact" {
-  count         = var.create_bucket && var.artifact_bucket != "" ? 1 : 0
+  count         = var.create_artifact_bucket && var.artifact_bucket != "" ? 1 : 0
   name          = var.artifact_bucket
   location      = var.region
   force_destroy = true
@@ -704,8 +704,10 @@ AIRFLOW__CORE__DAG_CONCURRENCY={{ flags.airflow_params.get('airflow_dag_concurre
 AIRFLOW__CORE__MAX_ACTIVE_RUNS_PER_DAG={{ flags.airflow_params.get('airflow_max_active_runs_per_dag', 2) }}
 AIRFLOW__API__WORKERS={{ flags.airflow_params.get('airflow_webserver_workers', 2) }}
 AIRFLOW__API__AUTHENTICATE=True
-AIRFLOW__WEBSERVER__AUTHENTICATE=True
-# Airflow 3.x uses default authentication - no custom backend needed
+AIRFLOW__API__AUTH_BACKEND=airflow.auth.backend.basic_auth
+AIRFLOW__API__AUTH_MANAGER=airflow.auth.manager.basic_auth.BasicAuthManager
+AIRFLOW__API__SESSION_TIMEOUT=3600
+# Airflow 3.x uses enhanced authentication with basic auth backend
 _AIRFLOW_DB_MIGRATE=true
 AIRFLOW_ENV_EOF
     chown $CURRENT_USER:$CURRENT_USER /home/$CURRENT_USER/deployml/docker/airflow_environment.env
@@ -781,22 +783,8 @@ services:
       - mlflow-network
     restart: unless-stopped
     # Wait for PostgreSQL to be ready before starting MLflow (when using PostgreSQL)
-    command: >
-      sh -c "
-        {% if flags.needs_postgres %}
-        echo 'Waiting for PostgreSQL to be ready...' &&
-        until pg_isready -h {{ '${google_sql_database_instance.postgres.public_ip_address}' }} -p 5432 -U {{ flags.first_tool_name }}; do
-          echo 'PostgreSQL not ready yet, waiting...' &&
-          sleep 5
-        done &&
-        echo 'PostgreSQL is ready! Starting MLflow...' &&
-        {% endif %}
-        mlflow server 
-        --host 0.0.0.0 
-        --port 5000
-        --backend-store-uri {% if flags.needs_postgres %}postgresql+psycopg2://{{ flags.first_tool_name }}:{{ '${random_password.db_password.result}' }}@{{ '${google_sql_database_instance.postgres.public_ip_address}' }}:5432/{{ '${google_sql_database.db.name}' }}{% else %}sqlite:///mlflow.db{% endif %}
-        --default-artifact-root {% if flags.mlflow_params.get('artifact_bucket') %}gs://{{ flags.mlflow_params.artifact_bucket }}{% else %}./mlflow-artifacts{% endif %}
-      "
+    entrypoint: ["/bin/bash"]
+    command: ["-c", "{% if flags.needs_postgres %}echo 'Waiting for PostgreSQL to be ready...' && until pg_isready -h {{ '${google_sql_database_instance.postgres.public_ip_address}' }} -p 5432 -U {{ flags.first_tool_name }}; do echo 'PostgreSQL not ready yet, waiting...' && sleep 5; done && echo 'PostgreSQL is ready! Starting MLflow...' && {% endif %}mlflow server --host 0.0.0.0 --port 5000 --backend-store-uri {% if flags.needs_postgres %}postgresql+psycopg2://{{ flags.first_tool_name }}:{{ '${random_password.db_password.result}' }}@{{ '${google_sql_database_instance.postgres.public_ip_address}' }}:5432/{{ '${google_sql_database.db.name}' }}{% else %}sqlite:///mlflow.db{% endif %} --default-artifact-root {% if flags.mlflow_params.get('artifact_bucket') %}gs://{{ flags.mlflow_params.artifact_bucket }}{% else %}./mlflow-artifacts{% endif %}"]
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
       interval: 30s
@@ -897,8 +885,10 @@ services:
       - AIRFLOW__CORE__MAX_ACTIVE_RUNS_PER_DAG={{ flags.airflow_params.get('airflow_max_active_runs_per_dag', 2) }}
       - AIRFLOW__API__WORKERS={{ flags.airflow_params.get('airflow_webserver_workers', 2) }}
       - AIRFLOW__API__AUTHENTICATE=True
-      - AIRFLOW__WEBSERVER__AUTHENTICATE=True
-      # Airflow 3.x uses default authentication - no custom backend needed
+      - AIRFLOW__API__AUTH_BACKEND=airflow.auth.backend.basic_auth
+      - AIRFLOW__API__AUTH_MANAGER=airflow.auth.manager.basic_auth.BasicAuthManager
+      - AIRFLOW__API__SESSION_TIMEOUT=3600
+      # Airflow 3.x uses enhanced authentication with basic auth backend
       # DB migration and user creation are handled by airflow-init only
     volumes:
       - /opt/airflow:/opt/airflow
@@ -932,8 +922,9 @@ services:
       - AIRFLOW__CORE__MAX_ACTIVE_RUNS_PER_DAG={{ flags.airflow_params.get('airflow_max_active_runs_per_dag', 2) }}
       - AIRFLOW__API__WORKERS={{ flags.airflow_params.get('airflow_webserver_workers', 2) }}
       - AIRFLOW__API__AUTHENTICATE=True
-      - AIRFLOW__WEBSERVER__AUTHENTICATE=True
-      # Airflow 3.x uses default authentication - no custom backend needed
+      - AIRFLOW__API__AUTH_BACKEND=airflow.auth.backend.basic_auth
+      - AIRFLOW__API__AUTH_MANAGER=airflow.auth.manager.basic_auth.BasicAuthManager
+      # Airflow 3.x uses enhanced authentication with basic auth backend
       # DB migration and user creation are handled by airflow-init only
     volumes:
       - /opt/airflow:/opt/airflow
@@ -967,8 +958,9 @@ services:
       - AIRFLOW__CORE__MAX_ACTIVE_RUNS_PER_DAG={{ flags.airflow_params.get('airflow_max_active_runs_per_dag', 2) }}
       - AIRFLOW__API__WORKERS={{ flags.airflow_params.get('airflow_webserver_workers', 2) }}
       - AIRFLOW__API__AUTHENTICATE=True
-      - AIRFLOW__WEBSERVER__AUTHENTICATE=True
-      # Airflow 3.x uses default authentication - no custom backend needed
+      - AIRFLOW__API__AUTH_BACKEND=airflow.auth.backend.basic_auth
+      - AIRFLOW__API__AUTH_MANAGER=airflow.auth.manager.basic_auth.BasicAuthManager
+      # Airflow 3.x uses enhanced authentication with basic auth backend
       - _AIRFLOW_DB_MIGRATE=true
     volumes:
       - /opt/airflow:/opt/airflow
@@ -976,7 +968,7 @@ services:
       - mlflow-network
     restart: "no"
     depends_on: []
-    command: ["/bin/bash", "-c", "airflow db migrate && airflow users create --username {{ flags.airflow_params.get('airflow_admin_user', 'admin') }} --firstname Admin --lastname User --email admin@example.com --password {{ flags.airflow_params.get('airflow_admin_password', 'admin') }} && airflow users set-role {{ flags.airflow_params.get('airflow_admin_user', 'admin') }} --role admin"]
+    command: ["airflow", "standalone"]
 {% endif %}
 
 volumes:
@@ -2616,6 +2608,16 @@ output "ssh_command" {
 {% if flags.mlflow_params.get("artifact_bucket") %}
 output "bucket_name" {
   value = "{{ flags.mlflow_params.artifact_bucket }}"
+}
+
+output "bucket_created" {
+  value = var.create_artifact_bucket
+  description = "Whether the artifact bucket was created by Terraform"
+}
+
+output "bucket_resource" {
+  value = var.create_artifact_bucket ? google_storage_bucket.artifact[0].name : "No bucket created"
+  description = "Name of the created bucket resource (if any)"
 }
 {% endif %}
 

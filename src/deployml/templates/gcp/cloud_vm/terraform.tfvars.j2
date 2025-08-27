@@ -42,6 +42,9 @@ create_service = true
 {% if "create_bucket" not in seen %}
 create_bucket = false
 {% endif %}
+
+# Add create_artifact_bucket variable for template logic
+create_artifact_bucket = {{ create_artifact_bucket | lower }}
 {% if "service_name" not in seen %}
 service_name = "mlflow-server"
 {% endif %}
