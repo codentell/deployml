@@ -1,7 +1,7 @@
 name: gcp-mlops-stack-mlflow-vm
 provider:
   name: gcp
-  project_id: hatchet10
+  project_id: hatchet11
   region: us-west2
   zone: us-west2-a
 
@@ -33,7 +33,7 @@ stack:
       params: 
         # artifact_bucket: mlflow-artifact-bucket-vm-54321
         artifact_bucket: mlflow-artifact-bucket-postgres-12345 # for postgres backend
-        create_bucket: true
+        create_artifact_bucket: true
   - model_registry:
       name: mlflow
       params: 
@@ -59,3 +59,27 @@ stack:
         grafana_port: 3000
         grafana_admin_user: admin
         grafana_admin_password: admin
+  - workflow_orchestration:
+      name: airflow
+      params:
+        service_name: airflow-server
+        airflow_port: 8080
+        airflow_worker_port: 8793
+        airflow_flower_port: 5555
+        backend_store_uri: postgresql
+        airflow_database_name: airflow
+        airflow_database_user: airflow
+        airflow_separate_database: true
+        airflow_admin_user: admin
+        airflow_admin_password: admin123
+        airflow_executor: LocalExecutor
+        airflow_parallelism: 4
+        airflow_dag_concurrency: 2
+        airflow_max_active_runs_per_dag: 2
+        airflow_webserver_workers: 1  # Set to 1 worker to fix child process issues
+        # Airflow 3.x authentication configuration - use default auth for proper functionality
+        # Remove custom auth backend to use Airflow's default working authentication
+        # airflow_auth_backend: "airflow.auth.backend.basic_auth"
+        # airflow_auth_manager: "airflow.auth.manager.basic_auth.BasicAuthManager"
+        # Enable RBAC for proper user management in Airflow 3.x
+        airflow_rbac: true
