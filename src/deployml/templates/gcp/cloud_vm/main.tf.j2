@@ -704,11 +704,9 @@ AIRFLOW__CORE__DAG_CONCURRENCY={{ flags.airflow_params.get('airflow_dag_concurre
 AIRFLOW__CORE__MAX_ACTIVE_RUNS_PER_DAG={{ flags.airflow_params.get('airflow_max_active_runs_per_dag', 2) }}
 AIRFLOW__API__WORKERS={{ flags.airflow_params.get('airflow_webserver_workers', 2) }}
 AIRFLOW__API__AUTHENTICATE=True
-AIRFLOW__API__AUTH_BACKEND=airflow.auth.backend.basic_auth
+AIRFLOW__WEBSERVER__AUTHENTICATE=True
+# Airflow 3.x uses default authentication - no custom backend needed
 _AIRFLOW_DB_MIGRATE=true
-_AIRFLOW_WWW_USER_CREATE=true
-_AIRFLOW_WWW_USER_USERNAME={{ flags.airflow_params.get('airflow_admin_user', 'admin') }}
-_AIRFLOW_WWW_USER_PASSWORD={{ flags.airflow_params.get('airflow_admin_password', 'admin') }}
 AIRFLOW_ENV_EOF
     chown $CURRENT_USER:$CURRENT_USER /home/$CURRENT_USER/deployml/docker/airflow_environment.env
     
@@ -782,12 +780,29 @@ services:
     networks:
       - mlflow-network
     restart: unless-stopped
+    # Wait for PostgreSQL to be ready before starting MLflow (when using PostgreSQL)
     command: >
-      mlflow server 
-      --host 0.0.0.0 
-      --port 5000
-      --backend-store-uri {% if flags.needs_postgres %}postgresql+psycopg2://{{ flags.first_tool_name }}:{{ '${random_password.db_password.result}' }}@{{ '${google_sql_database_instance.postgres.public_ip_address}' }}:5432/{{ '${google_sql_database.db.name}' }}{% else %}sqlite:///mlflow.db{% endif %}
-      --default-artifact-root {% if flags.mlflow_params.get('artifact_bucket') %}gs://{{ flags.mlflow_params.artifact_bucket }}{% else %}./mlflow-artifacts{% endif %}
+      sh -c "
+        {% if flags.needs_postgres %}
+        echo 'Waiting for PostgreSQL to be ready...' &&
+        until pg_isready -h {{ '${google_sql_database_instance.postgres.public_ip_address}' }} -p 5432 -U {{ flags.first_tool_name }}; do
+          echo 'PostgreSQL not ready yet, waiting...' &&
+          sleep 5
+        done &&
+        echo 'PostgreSQL is ready! Starting MLflow...' &&
+        {% endif %}
+        mlflow server 
+        --host 0.0.0.0 
+        --port 5000
+        --backend-store-uri {% if flags.needs_postgres %}postgresql+psycopg2://{{ flags.first_tool_name }}:{{ '${random_password.db_password.result}' }}@{{ '${google_sql_database_instance.postgres.public_ip_address}' }}:5432/{{ '${google_sql_database.db.name}' }}{% else %}sqlite:///mlflow.db{% endif %}
+        --default-artifact-root {% if flags.mlflow_params.get('artifact_bucket') %}gs://{{ flags.mlflow_params.artifact_bucket }}{% else %}./mlflow-artifacts{% endif %}
+      "
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
     
   fastapi:
     build:
@@ -882,7 +897,8 @@ services:
       - AIRFLOW__CORE__MAX_ACTIVE_RUNS_PER_DAG={{ flags.airflow_params.get('airflow_max_active_runs_per_dag', 2) }}
       - AIRFLOW__API__WORKERS={{ flags.airflow_params.get('airflow_webserver_workers', 2) }}
       - AIRFLOW__API__AUTHENTICATE=True
-      - AIRFLOW__API__AUTH_BACKEND=airflow.auth.backend.basic_auth
+      - AIRFLOW__WEBSERVER__AUTHENTICATE=True
+      # Airflow 3.x uses default authentication - no custom backend needed
       # DB migration and user creation are handled by airflow-init only
     volumes:
       - /opt/airflow:/opt/airflow
@@ -893,7 +909,7 @@ services:
       - airflow-init
     command: ["airflow", "api-server"]
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8080/"]  # Change from /health to /
+      test: ["CMD", "curl", "-f", "http://localhost:8080/"]  # Root endpoint for health check
       interval: 120s
       timeout: 60s
       retries: 10
@@ -916,7 +932,8 @@ services:
       - AIRFLOW__CORE__MAX_ACTIVE_RUNS_PER_DAG={{ flags.airflow_params.get('airflow_max_active_runs_per_dag', 2) }}
       - AIRFLOW__API__WORKERS={{ flags.airflow_params.get('airflow_webserver_workers', 2) }}
       - AIRFLOW__API__AUTHENTICATE=True
-      - AIRFLOW__API__AUTH_BACKEND=airflow.auth.backend.basic_auth
+      - AIRFLOW__WEBSERVER__AUTHENTICATE=True
+      # Airflow 3.x uses default authentication - no custom backend needed
       # DB migration and user creation are handled by airflow-init only
     volumes:
       - /opt/airflow:/opt/airflow
@@ -950,18 +967,16 @@ services:
       - AIRFLOW__CORE__MAX_ACTIVE_RUNS_PER_DAG={{ flags.airflow_params.get('airflow_max_active_runs_per_dag', 2) }}
       - AIRFLOW__API__WORKERS={{ flags.airflow_params.get('airflow_webserver_workers', 2) }}
       - AIRFLOW__API__AUTHENTICATE=True
-      - AIRFLOW__API__AUTH_BACKEND=airflow.auth.backend.basic_auth
+      - AIRFLOW__WEBSERVER__AUTHENTICATE=True
+      # Airflow 3.x uses default authentication - no custom backend needed
       - _AIRFLOW_DB_MIGRATE=true
-      - _AIRFLOW_WWW_USER_CREATE=true
-      - _AIRFLOW_WWW_USER_USERNAME={{ flags.airflow_params.get('airflow_admin_user', 'admin') }}
-      - _AIRFLOW_WWW_USER_PASSWORD={{ flags.airflow_params.get('airflow_admin_password', 'admin') }}
     volumes:
       - /opt/airflow:/opt/airflow
     networks:
       - mlflow-network
     restart: "no"
     depends_on: []
-    command: ["sh", "-c", "airflow db migrate && airflow users create --username {{ flags.airflow_params.get('airflow_admin_user', 'admin') }} --firstname Admin --lastname User --role Admin --email admin@example.com --password {{ flags.airflow_params.get('airflow_admin_password', 'admin') }}"]
+    command: ["/bin/bash", "-c", "airflow db migrate && airflow users create --username {{ flags.airflow_params.get('airflow_admin_user', 'admin') }} --firstname Admin --lastname User --email admin@example.com --password {{ flags.airflow_params.get('airflow_admin_password', 'admin') }} && airflow users set-role {{ flags.airflow_params.get('airflow_admin_user', 'admin') }} --role admin"]
 {% endif %}
 
 volumes:

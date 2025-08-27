@@ -77,3 +77,9 @@ stack:
         airflow_dag_concurrency: 2
         airflow_max_active_runs_per_dag: 2
         airflow_webserver_workers: 1  # Set to 1 worker to fix child process issues
+        # Airflow 3.x authentication configuration - use default auth for proper functionality
+        # Remove custom auth backend to use Airflow's default working authentication
+        # airflow_auth_backend: "airflow.auth.backend.basic_auth"
+        # airflow_auth_manager: "airflow.auth.manager.basic_auth.BasicAuthManager"
+        # Enable RBAC for proper user management in Airflow 3.x
+        airflow_rbac: true
