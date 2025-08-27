@@ -145,7 +145,7 @@ variable "allow_http_https" {
             "image", "allow_public_access", "auto_approve", "cpu_limit", "memory_limit",
             "cpu_request", "memory_request", "max_scale", "container_concurrency",
             "global_image", "db_type", "db_user", "db_password", "db_name", "db_port",
-            "create_artifact_bucket", "service_name"
+            "create_artifact_bucket", "service_name", "bigquery_dataset"
         ] -%}
 variable "{{ key }}" {
   description = "Parameter {{ key }}"
@@ -157,6 +157,13 @@ variable "{{ key }}" {
       {% if key == "image" %}
 variable "{{ stage_name }}_{{ tool.name }}_image" {
   description = "Custom image for {{ stage_name }}_{{ tool.name }}"
+  type        = string
+  default     = ""
+}
+      {% endif %}
+      {% if key == "bigquery_dataset" %}
+variable "{{ stage_name }}_bigquery_dataset" {
+  description = "BigQuery dataset for {{ stage_name }}_{{ tool.name }}"
   type        = string
   default     = ""
 }
