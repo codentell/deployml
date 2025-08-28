@@ -77,4 +77,3 @@ stack:
         airflow_dag_concurrency: 2
         airflow_max_active_runs_per_dag: 2
         airflow_webserver_workers: 1  # Set to 1 worker to fix child process issues
-        airflow_rbac: true
