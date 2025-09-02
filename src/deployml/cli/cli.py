@@ -408,21 +408,6 @@ def deploy(
         deployment_type=deployment_type,
         cloud=cloud,
     )
-
-    # Ensure all stages use Cloud SQL if any stage needs it
-    needs_postgres = any(
-        tool.get("params", {})
-        .get("backend_store_uri", "")
-        .startswith("postgresql")
-        for stage in stack
-        for tool in stage.values()
-    )
-    if needs_postgres:
-        for stage in stack:
-            for tool in stage.values():
-                tool.setdefault("params", {})
-                tool["params"]["backend_store_uri"] = "postgresql"
-
     # --- UNIFIED BUCKET CONFIGURATION APPROACH ---
     # Collect all bucket configurations in a structured way (similar to VM creation)
     bucket_configs = []

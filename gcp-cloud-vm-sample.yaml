@@ -50,7 +50,7 @@ stack:
         offline_store_type: bigquery
         bigquery_dataset: feast_offline_store
         create_bigquery_dataset: true
-        sample_data: true  # Set to true to create sample sales data table
+        sample_data: false  # Set to true to create sample sales data table
   - model_monitoring:
       name: grafana
       params: 
@@ -77,4 +77,3 @@ stack:
         airflow_dag_concurrency: 2
         airflow_max_active_runs_per_dag: 2
         airflow_webserver_workers: 1  # Set to 1 worker to fix child process issues
-        airflow_rbac: true
