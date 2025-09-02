@@ -50,7 +50,7 @@ stack:
         offline_store_type: bigquery
         bigquery_dataset: feast_offline_store
         create_bigquery_dataset: true
-        sample_data: true  # Set to true to create sample sales data table
+        sample_data: false  # Set to true to create sample sales data table
   - model_monitoring:
       name: grafana
       params: 
