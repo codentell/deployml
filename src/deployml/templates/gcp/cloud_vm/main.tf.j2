@@ -51,24 +51,27 @@
 # - FastAPI depends on MLflow being healthy
 # - All services depend on PostgreSQL being ready
 
-{% if create_artifact_bucket %}
-{% for stage in stack %}
-  {% for stage_name, tool in stage.items() %}
-    {% if tool.params.get("artifact_bucket") %}
-resource "google_storage_bucket" "{{ stage_name }}_{{ tool.name }}_artifact" {
-  name          = var.artifact_bucket
+# --- UNIFIED BUCKET CREATION ---
+# Create buckets based on structured configuration from CLI
+{% if bucket_configs %}
+# Creating buckets based on unified configuration...
+{% for config in bucket_configs %}
+# Bucket for {{ config.stage }}/{{ config.tool }}
+resource "google_storage_bucket" "{{ config.stage }}_{{ config.tool }}_artifact" {
+  name          = "{{ config.bucket_name }}"
   location      = var.region
   force_destroy = true
+  count         = {{ config.create | lower }} ? 1 : 0
 
   labels = {
-    component  = "{{ tool.name }}-artifacts"
+    component  = "{{ config.tool }}-artifacts"
     managed-by = "terraform"
-    stage      = "{{ stage_name }}"
+    stage      = "{{ config.stage }}"
   }
 }
-    {% endif %}
-  {% endfor %}
 {% endfor %}
+{% else %}
+# No bucket configurations found
 {% endif %}
 
 provider "google" {
@@ -79,6 +82,11 @@ provider "google" {
 
 # Detect PostgreSQL and collect service configurations from all stages
 {% set flags = namespace(needs_postgres=false, needs_feast=false, needs_grafana=false, needs_airflow=false, first_tool_name="", mlflow_params={}, feast_params={}, grafana_params={}, airflow_params={}) %}
+
+# Set database type flags based on backend_store_uri configuration
+{% set flags.use_cloudsql = false %}
+{% set flags.use_local_postgres = false %}
+{% set flags.use_sqlite = false %}
 {% for stage in stack %}
   {% for stage_name, tool in stage.items() %}
     {% if tool.name == "mlflow" %}
@@ -87,6 +95,18 @@ provider "google" {
       {% endfor %}
       {% if tool.params.get("backend_store_uri", "") == "postgresql" %}
         {% set flags.needs_postgres = true %}
+        {% set flags.use_cloudsql = true %}
+        {% if not flags.first_tool_name %}
+          {% set flags.first_tool_name = tool.name %}
+        {% endif %}
+      {% elif tool.params.get("backend_store_uri", "") == "cloudsql" %}
+        {% set flags.needs_postgres = true %}
+        {% set flags.use_cloudsql = true %}
+        {% if not flags.first_tool_name %}
+          {% set flags.first_tool_name = tool.name %}
+        {% endif %}
+      {% elif tool.params.get("backend_store_uri", "") == "sqlite" %}
+        {% set flags.use_sqlite = true %}
         {% if not flags.first_tool_name %}
           {% set flags.first_tool_name = tool.name %}
         {% endif %}
@@ -99,6 +119,18 @@ provider "google" {
       {% endfor %}
       {% if tool.params.get("backend_store_uri", "") == "postgresql" %}
         {% set flags.needs_postgres = true %}
+        {% set flags.use_cloudsql = true %}
+        {% if not flags.first_tool_name %}
+          {% set flags.first_tool_name = tool.name %}
+        {% endif %}
+      {% elif tool.params.get("backend_store_uri", "") == "cloudsql" %}
+        {% set flags.needs_postgres = true %}
+        {% set flags.use_cloudsql = true %}
+        {% if not flags.first_tool_name %}
+          {% set flags.first_tool_name = tool.name %}
+        {% endif %}
+      {% elif tool.params.get("backend_store_uri", "") == "sqlite" %}
+        {% set flags.use_sqlite = true %}
         {% if not flags.first_tool_name %}
           {% set flags.first_tool_name = tool.name %}
         {% endif %}
@@ -117,6 +149,18 @@ provider "google" {
       {% endfor %}
       {% if tool.params.get("backend_store_uri", "") == "postgresql" %}
         {% set flags.needs_postgres = true %}
+        {% set flags.use_cloudsql = true %}
+        {% if not flags.first_tool_name %}
+          {% set flags.first_tool_name = tool.name %}
+        {% endif %}
+      {% elif tool.params.get("backend_store_uri", "") == "cloudsql" %}
+        {% set flags.needs_postgres = true %}
+        {% set flags.use_cloudsql = true %}
+        {% if not flags.first_tool_name %}
+          {% set flags.first_tool_name = tool.name %}
+        {% endif %}
+      {% elif tool.params.get("backend_store_uri", "") == "sqlite" %}
+        {% set flags.use_sqlite = true %}
         {% if not flags.first_tool_name %}
           {% set flags.first_tool_name = tool.name %}
         {% endif %}
@@ -148,7 +192,7 @@ resource "google_project_service" "required_apis" {
     "monitoring.googleapis.com",                # Cloud Monitoring
     "serviceusage.googleapis.com",              # Service Usage (for enabling APIs)
     "cloudresourcemanager.googleapis.com",     # Cloud Resource Manager (project operations)
-    {% if flags.needs_postgres %}
+    {% if flags.use_cloudsql %}
     "sqladmin.googleapis.com",                  # Cloud SQL Admin API (for PostgreSQL)
     "sql-component.googleapis.com",             # Cloud SQL component API
     "servicenetworking.googleapis.com",         # For private service connections
@@ -209,6 +253,7 @@ resource "random_password" "airflow_fernet_key" {
 }
 {% endif %}
 
+{% if flags.use_cloudsql %}
 # Cloud SQL PostgreSQL instance
 resource "google_sql_database_instance" "postgres" {
   name             = "{{ flags.first_tool_name }}-postgres-{{ project_id }}"
@@ -229,7 +274,9 @@ resource "google_sql_database_instance" "postgres" {
 
   deletion_protection = false
 }
+{% endif %}
 
+{% if flags.use_cloudsql %}
 # Database within the instance for MLflow
 resource "google_sql_database" "db" {
   name     = "{{ flags.first_tool_name }}"
@@ -237,8 +284,9 @@ resource "google_sql_database" "db" {
   project  = var.project_id
   depends_on = [google_sql_database_instance.postgres]
 }
+{% endif %}
 
-{% if flags.needs_feast %}
+{% if flags.use_cloudsql and flags.needs_feast %}
 # Separate database for FEAST
 resource "google_sql_database" "feast_db" {
   name     = var.feast_database_name
@@ -248,7 +296,7 @@ resource "google_sql_database" "feast_db" {
 }
 {% endif %}
 
-{% if flags.needs_airflow %}
+{% if flags.use_cloudsql and flags.needs_airflow %}
 # Separate database for Airflow
 resource "google_sql_database" "airflow_db" {
   name     = var.airflow_database_name
@@ -258,6 +306,7 @@ resource "google_sql_database" "airflow_db" {
 }
 {% endif %}
 
+{% if flags.use_cloudsql %}
 # Database user for MLflow
 resource "google_sql_user" "users" {
   name     = "{{ flags.first_tool_name }}"
@@ -266,8 +315,9 @@ resource "google_sql_user" "users" {
   project  = var.project_id
   depends_on = [google_sql_database_instance.postgres]
 }
+{% endif %}
 
-{% if flags.needs_feast %}
+{% if flags.use_cloudsql and flags.needs_feast %}
 # Separate database user for FEAST
 resource "google_sql_user" "feast_user" {
   name     = var.feast_database_user
@@ -278,7 +328,7 @@ resource "google_sql_user" "feast_user" {
 }
 {% endif %}
 
-{% if flags.needs_airflow %}
+{% if flags.use_cloudsql and flags.needs_airflow %}
 # Separate database user for Airflow
 resource "google_sql_user" "airflow_user" {
   name     = var.airflow_database_user
@@ -296,21 +346,8 @@ resource "google_sql_user" "airflow_user" {
 # 3. Then retry terraform destroy
 {% endif %}
 
-# Storage bucket - only create if explicitly requested
-resource "google_storage_bucket" "artifact" {
-  count         = var.create_bucket && var.artifact_bucket != "" ? 1 : 0
-  name          = var.artifact_bucket
-  location      = var.region
-  force_destroy = true
-  
-  # Explicit dependency to ensure APIs are ready FIRST
-  depends_on = [null_resource.api_readiness_check]
-  
-  labels = {
-    component  = "mlflow-artifacts"
-    managed-by = "terraform"
-  }
-}
+# Main artifact bucket is now handled by stage-specific buckets above
+# This ensures consistent bucket naming and avoids conflicts
 
 # Create a service account for the VM
 resource "google_service_account" "vm_service_account" {
@@ -323,9 +360,8 @@ resource "google_service_account" "vm_service_account" {
 }
 
 # Project-level IAM bindings for the service account (these will show up in the IAM UI)
-{% for stage in stack %}
-  {% for stage_name, tool in stage.items() %}
-    {% if tool.name == "mlflow" and tool.params.get("artifact_bucket") %}
+{% if bucket_configs %}
+# Grant storage permissions if any buckets are configured
 resource "google_project_iam_member" "vm_service_account_storage_admin" {
   project    = var.project_id
   role       = "roles/storage.objectAdmin"
@@ -339,9 +375,7 @@ resource "google_project_iam_member" "vm_service_account_storage_viewer" {
   member     = "serviceAccount:${google_service_account.vm_service_account.email}"
   depends_on = [google_service_account.vm_service_account, null_resource.api_readiness_check]
 }
-    {% endif %}
-  {% endfor %}
-{% endfor %}
+{% endif %}
 
 # Additional useful permissions for the VM service account
 resource "google_project_iam_member" "vm_service_account_logging" {
@@ -444,12 +478,12 @@ resource "google_compute_instance" "mlflow_vm" {
 locals {
   {% if flags.needs_postgres %}
   # Use PostgreSQL connection string from the direct resources
-  postgres_connection_string = "postgresql+psycopg2://${google_sql_user.users.name}:${random_password.db_password.result}@${google_sql_database_instance.postgres.public_ip_address}:5432/${google_sql_database.db.name}"
-  backend_store_uri = "postgresql+psycopg2://${google_sql_user.users.name}:${random_password.db_password.result}@${google_sql_database_instance.postgres.public_ip_address}:5432/${google_sql_database.db.name}"
+      postgres_connection_string = "postgresql+psycopg2://${google_sql_user.users.name}:${random_password.db_password.result}@${google_sql_database_instance.postgres.public_ip_address}:5432/${google_sql_database.db.name}"
+    backend_store_uri = "postgresql+psycopg2://${google_sql_user.users.name}:${random_password.db_password.result}@${google_sql_database_instance.postgres.public_ip_address}:5432/${google_sql_database.db.name}"
   {% if flags.needs_feast %}
   # FEAST PostgreSQL configuration - use separate database and user
-  feast_registry_uri = "postgresql+psycopg2://${google_sql_user.feast_user.name}:${random_password.db_password.result}@${google_sql_database_instance.postgres.public_ip_address}:5432/${google_sql_database.feast_db.name}"
-  feast_postgres_host = google_sql_database_instance.postgres.public_ip_address
+      feast_registry_uri = "postgresql+psycopg2://${google_sql_user.feast_user.name}:${random_password.db_password.result}@${google_sql_database_instance.postgres.public_ip_address}:5432/${google_sql_database.feast_db.name}"
+    feast_postgres_host = google_sql_database_instance.postgres.public_ip_address
   feast_postgres_port = "5432"
   feast_postgres_database = google_sql_database.feast_db.name
   feast_postgres_user = google_sql_user.feast_user.name
@@ -466,8 +500,8 @@ locals {
 
   {% if flags.needs_airflow %}
   # Airflow PostgreSQL configuration - use separate database and user
-  airflow_sql_alchemy_conn = "postgresql+psycopg2://${google_sql_user.airflow_user.name}:${random_password.db_password.result}@${google_sql_database_instance.postgres.public_ip_address}:5432/${google_sql_database.airflow_db.name}"
-  airflow_postgres_host = google_sql_database_instance.postgres.public_ip_address
+      airflow_sql_alchemy_conn = "postgresql+psycopg2://${google_sql_user.airflow_user.name}:${random_password.db_password.result}@${google_sql_database_instance.postgres.public_ip_address}:5432/${google_sql_database.airflow_db.name}"
+    airflow_postgres_host = google_sql_database_instance.postgres.public_ip_address
   airflow_postgres_port = "5432"
   airflow_postgres_database = google_sql_database.airflow_db.name
   airflow_postgres_user = google_sql_user.airflow_user.name
@@ -591,14 +625,39 @@ locals {
     echo "   - /home/$CURRENT_USER/deployml/docker/airflow"
     {% endif %}
 
-    {% if flags.needs_feast and flags.needs_postgres %}
-    # Grant MLflow user access to FEAST database for cross-database operations
-    echo "Setting up database permissions for MLflow and FEAST..."
+    {% if flags.use_local_postgres %}
+    # Install and configure local PostgreSQL
+    echo "Setting up local PostgreSQL database..."
+    sudo apt-get install -y postgresql postgresql-contrib
+    
+    # Start PostgreSQL service
+    sudo systemctl enable postgresql
+    sudo systemctl start postgresql
+    
+    # Create databases and users
+    echo "Creating local PostgreSQL databases and users..."
+    sudo -u postgres psql -c "CREATE USER mlflow WITH PASSWORD '{{ '${random_password.db_password.result}' }}';"
+    sudo -u postgres psql -c "CREATE DATABASE mlflow OWNER mlflow;"
+    {% if flags.needs_feast %}
+    sudo -u postgres psql -c "CREATE USER feast WITH PASSWORD '{{ '${random_password.db_password.result}' }}';"
+    sudo -u postgres psql -c "CREATE DATABASE feast OWNER feast;"
+    {% endif %}
+    {% if flags.needs_airflow %}
+    sudo -u postgres psql -c "CREATE USER airflow WITH PASSWORD '{{ '${random_password.db_password.result}' }}';"
+    sudo -u postgres psql -c "CREATE DATABASE airflow OWNER airflow;"
+    {% endif %}
+    
+    echo "✅ Local PostgreSQL setup completed"
+    {% endif %}
+
+    {% if flags.needs_feast and flags.use_cloudsql %}
+    # Grant MLflow user access to FEAST database for cross-database operations (Cloud SQL)
+    echo "Setting up Cloud SQL database permissions for MLflow and FEAST..."
     
     # Wait for PostgreSQL to be ready
-    echo "Waiting for PostgreSQL to be ready for permission setup..."
+    echo "Waiting for Cloud SQL PostgreSQL to be ready for permission setup..."
     until pg_isready -h {{ '${google_sql_database_instance.postgres.public_ip_address}' }} -p 5432 -U {{ flags.first_tool_name }}; do
-        echo "PostgreSQL not ready yet, waiting..."
+        echo "Cloud SQL PostgreSQL not ready yet, waiting..."
         sleep 5
     done
     
@@ -622,12 +681,12 @@ locals {
     GRANT SELECT ON ALL TABLES IN SCHEMA public TO {{ '${var.feast_database_user}' }};
     " || echo "Warning: Could not grant permissions (this may be normal if MLflow database doesn't exist yet)"
     
-    echo "Database permissions setup completed"
+    echo "Cloud SQL database permissions setup completed"
     {% endif %}
 
-    {% if flags.needs_airflow and flags.needs_postgres %}
-    # Grant MLflow user access to Airflow database for cross-database operations
-    echo "Setting up database permissions for MLflow and Airflow..."
+    {% if flags.needs_airflow and flags.use_cloudsql %}
+    # Grant MLflow user access to Airflow database for cross-database operations (Cloud SQL)
+    echo "Setting up Cloud SQL database permissions for MLflow and Airflow..."
     
     # Grant MLflow user access to Airflow database
     echo "Granting MLflow user access to Airflow database..."
@@ -645,29 +704,35 @@ locals {
     GRANT SELECT ON ALL TABLES IN SCHEMA public TO {{ flags.first_tool_name }};
     " || echo "Warning: Could not grant permissions (this may be normal if MLflow database doesn't exist yet)"
     
-    echo "Airflow database permissions setup completed"
+    echo "Cloud SQL database permissions setup completed"
     {% endif %}
 
 {% if flags.needs_feast %}
     # Create Feast environment configuration with actual PostgreSQL credentials
     echo "Setting up Feast environment configuration..."
     cat > /home/$CURRENT_USER/deployml/docker/feast_environment.env << 'FEAST_ENV_EOF'
-FEAST_REGISTRY_TYPE={{ 'sql' if flags.needs_postgres else 'file' }}
-FEAST_REGISTRY_PATH={{ 'postgresql+psycopg2://' + flags.first_tool_name + ':' + '${random_password.db_password.result}' + '@' + '${google_sql_database_instance.postgres.public_ip_address}' + ':5432/' + '${google_sql_database.db.name}' if flags.needs_postgres else 'data/registry.db' }}
-FEAST_ONLINE_STORE_TYPE={{ 'postgres' if flags.needs_postgres else 'sqlite' }}
-{% if flags.needs_postgres %}
+FEAST_REGISTRY_TYPE={{ 'sql' if flags.use_cloudsql or flags.use_local_postgres else 'file' }}
+FEAST_REGISTRY_PATH={% if flags.use_cloudsql %}postgresql+psycopg2://{{ flags.first_tool_name }}:{{ '${random_password.db_password.result}' }}@{{ '${google_sql_database_instance.postgres.public_ip_address}' }}:5432/{{ '${google_sql_database.db.name}' }}{% elif flags.use_local_postgres %}postgresql+psycopg2://{{ flags.first_tool_name }}:{{ '${random_password.db_password.result}' }}@localhost:5432/{{ flags.first_tool_name }}{% else %}data/registry.db{% endif %}
+FEAST_ONLINE_STORE_TYPE={{ 'postgres' if flags.use_cloudsql or flags.use_local_postgres else 'sqlite' }}
+{% if flags.use_cloudsql %}
 FEAST_ONLINE_STORE_HOST={{ '${google_sql_database_instance.postgres.public_ip_address}' }}
 FEAST_ONLINE_STORE_PORT=5432
 FEAST_ONLINE_STORE_DATABASE={{ '${google_sql_database.db.name}' }}
+FEAST_ONLINE_STORE_USER={{ flags.first_tool_name }}
+FEAST_ONLINE_STORE_PASSWORD={{ '${random_password.db_password.result}' }}
+{% elif flags.use_local_postgres %}
+FEAST_ONLINE_STORE_HOST=localhost
+FEAST_ONLINE_STORE_PORT=5432
+FEAST_ONLINE_STORE_DATABASE={{ flags.first_tool_name }}
 FEAST_ONLINE_STORE_USER={{ flags.first_tool_name }}
 FEAST_ONLINE_STORE_PASSWORD={{ '${random_password.db_password.result}' }}
 {% endif %}
 FEAST_OFFLINE_STORE_TYPE=bigquery
 FEAST_OFFLINE_STORE_PROJECT={{ project_id }}
 FEAST_OFFLINE_STORE_DATASET={{ flags.feast_params.get('bigquery_dataset', 'feast_offline_store') }}
-FEAST_ARTIFACT_BUCKET={{ flags.mlflow_params.get('artifact_bucket', '') }}
+FEAST_ARTIFACT_BUCKET={% if bucket_configs %}{% for config in bucket_configs %}{% if config.create %}{{ config.bucket_name }}{% endif %}{% endfor %}{% else %}{% endif %}
 GOOGLE_CLOUD_PROJECT={{ project_id }}
-USE_POSTGRES={{ 'true' if flags.needs_postgres else 'false' }}
+USE_POSTGRES={{ 'true' if flags.use_cloudsql or flags.use_local_postgres else 'false' }}
 FEAST_PORT={{ flags.feast_params.get('feast_port', 6566) }}
 GOOGLE_APPLICATION_CREDENTIALS=
 FEAST_ENV_EOF
@@ -679,7 +744,7 @@ FEAST_ENV_EOF
     echo "Setting up Airflow environment configuration..."
     
     # Force PostgreSQL usage when Airflow is enabled and PostgreSQL is configured
-    {% if flags.needs_postgres %}
+    {% if flags.use_cloudsql or flags.use_local_postgres %}
     echo "🔧 Airflow will use PostgreSQL database"
     {% else %}
     echo "⚠️  WARNING: Airflow is enabled but PostgreSQL is not configured!"
@@ -688,8 +753,10 @@ FEAST_ENV_EOF
     
     cat > /home/$CURRENT_USER/deployml/docker/airflow_environment.env << 'AIRFLOW_ENV_EOF'
 AIRFLOW__CORE__EXECUTOR={{ flags.airflow_params.get('airflow_executor', 'LocalExecutor') }}
-{% if flags.needs_postgres %}
+{% if flags.use_cloudsql %}
 AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=postgresql+psycopg2://{{ '${google_sql_user.airflow_user.name}' }}:{{ '${random_password.db_password.result}' }}@{{ '${google_sql_database_instance.postgres.public_ip_address}' }}:5432/{{ '${google_sql_database.airflow_db.name}' }}
+{% elif flags.use_local_postgres %}
+AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=postgresql+psycopg2://airflow:{{ '${random_password.db_password.result}' }}@localhost:5432/airflow
 {% else %}
 AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=sqlite:////opt/airflow/airflow.db
 {% endif %}
@@ -697,31 +764,37 @@ AIRFLOW__CORE__FERNET_KEY={{ '${random_password.airflow_fernet_key.result}' }}
 AIRFLOW__CORE__SECRET_KEY={{ '${random_password.airflow_secret_key.result}' }}
 AIRFLOW__CORE__LOAD_EXAMPLES=False
 AIRFLOW__API__SECRET_KEY={{ '${random_password.airflow_secret_key.result}' }}
-AIRFLOW__API__RBAC=True
+# RBAC is handled by Simple Auth Manager in Airflow 3.0+
 AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION=True
 AIRFLOW__CORE__PARALLELISM={{ flags.airflow_params.get('airflow_parallelism', 4) }}
 AIRFLOW__CORE__DAG_CONCURRENCY={{ flags.airflow_params.get('airflow_dag_concurrency', 2) }}
 AIRFLOW__CORE__MAX_ACTIVE_RUNS_PER_DAG={{ flags.airflow_params.get('airflow_max_active_runs_per_dag', 2) }}
 AIRFLOW__API__WORKERS={{ flags.airflow_params.get('airflow_webserver_workers', 2) }}
 AIRFLOW__API__AUTHENTICATE=True
-AIRFLOW__WEBSERVER__AUTHENTICATE=True
-# Airflow 3.x uses default authentication - no custom backend needed
-_AIRFLOW_DB_MIGRATE=true
+AIRFLOW__API__AUTH_BACKEND=airflow.auth.backend.basic_auth
+AIRFLOW__API__AUTH_MANAGER=airflow.auth.manager.basic_auth.BasicAuthManager
+AIRFLOW__API__SESSION_TIMEOUT=3600
 AIRFLOW_ENV_EOF
     chown $CURRENT_USER:$CURRENT_USER /home/$CURRENT_USER/deployml/docker/airflow_environment.env
     
     echo "✅ Airflow environment file created at /home/$CURRENT_USER/deployml/docker/airflow_environment.env"
     echo "📁 File size: $(wc -c < /home/$CURRENT_USER/deployml/docker/airflow_environment.env) bytes"
-    echo "🔧 Airflow will use: {% if flags.needs_postgres %}PostgreSQL{% else %}SQLite{% endif %} database"
+    echo "🔧 Airflow will use: {% if flags.use_cloudsql or flags.use_local_postgres %}PostgreSQL{% else %}SQLite{% endif %} database"
     
     # Show the actual database connection string that will be used
     echo "🔍 Database connection details:"
-    {% if flags.needs_postgres %}
-    echo "   Type: PostgreSQL"
+    {% if flags.use_cloudsql %}
+    echo "   Type: PostgreSQL (Cloud SQL)"
     echo "   Host: {{ '${google_sql_database_instance.postgres.public_ip_address}' }}"
     echo "   Port: 5432"
     echo "   Database: {{ '${google_sql_database.airflow_db.name}' }}"
     echo "   User: {{ '${google_sql_user.airflow_user.name}' }}"
+    {% elif flags.use_local_postgres %}
+    echo "   Type: PostgreSQL (Local)"
+    echo "   Host: localhost"
+    echo "   Port: 5432"
+    echo "   Database: airflow"
+    echo "   User: airflow"
     {% else %}
     echo "   Type: SQLite"
     echo "   Path: /opt/airflow/airflow.db"
@@ -771,7 +844,7 @@ services:
       - "{{ flags.mlflow_params.mlflow_port }}:5000"
     environment:
       - MLFLOW_BACKEND_STORE_URI={% if flags.needs_postgres %}postgresql+psycopg2://{{ flags.first_tool_name }}:{{ '${random_password.db_password.result}' }}@{{ '${google_sql_database_instance.postgres.public_ip_address}' }}:5432/{{ '${google_sql_database.db.name}' }}{% else %}sqlite:///mlflow.db{% endif %}
-      - MLFLOW_DEFAULT_ARTIFACT_ROOT={% if flags.mlflow_params.get('artifact_bucket') %}gs://{{ flags.mlflow_params.artifact_bucket }}{% else %}./mlflow-artifacts{% endif %}
+      - MLFLOW_DEFAULT_ARTIFACT_ROOT={% if bucket_configs %}{% for config in bucket_configs %}{% if config.create %}gs://{{ config.bucket_name }}{% endif %}{% endfor %}{% else %}./mlflow-artifacts{% endif %}
       - MLFLOW_SERVER_HOST=0.0.0.0
       - MLFLOW_SERVER_PORT=5000
     volumes:
@@ -781,22 +854,8 @@ services:
       - mlflow-network
     restart: unless-stopped
     # Wait for PostgreSQL to be ready before starting MLflow (when using PostgreSQL)
-    command: >
-      sh -c "
-        {% if flags.needs_postgres %}
-        echo 'Waiting for PostgreSQL to be ready...' &&
-        until pg_isready -h {{ '${google_sql_database_instance.postgres.public_ip_address}' }} -p 5432 -U {{ flags.first_tool_name }}; do
-          echo 'PostgreSQL not ready yet, waiting...' &&
-          sleep 5
-        done &&
-        echo 'PostgreSQL is ready! Starting MLflow...' &&
-        {% endif %}
-        mlflow server 
-        --host 0.0.0.0 
-        --port 5000
-        --backend-store-uri {% if flags.needs_postgres %}postgresql+psycopg2://{{ flags.first_tool_name }}:{{ '${random_password.db_password.result}' }}@{{ '${google_sql_database_instance.postgres.public_ip_address}' }}:5432/{{ '${google_sql_database.db.name}' }}{% else %}sqlite:///mlflow.db{% endif %}
-        --default-artifact-root {% if flags.mlflow_params.get('artifact_bucket') %}gs://{{ flags.mlflow_params.artifact_bucket }}{% else %}./mlflow-artifacts{% endif %}
-      "
+    entrypoint: ["/bin/bash"]
+    command: ["-c", "{% if flags.needs_postgres %}echo 'Waiting for PostgreSQL to be ready...' && until pg_isready -h {{ '${google_sql_database_instance.postgres.public_ip_address}' }} -p 5432 -U {{ flags.first_tool_name }}; do echo 'PostgreSQL not ready yet, waiting...' && sleep 5; done && echo 'PostgreSQL is ready! Starting MLflow...' && {% endif %}mlflow server --host 0.0.0.0 --port 5000 --backend-store-uri {% if flags.needs_postgres %}postgresql+psycopg2://{{ flags.first_tool_name }}:{{ '${random_password.db_password.result}' }}@{{ '${google_sql_database_instance.postgres.public_ip_address}' }}:5432/{{ '${google_sql_database.db.name}' }}{% else %}sqlite:///mlflow.db{% endif %} --default-artifact-root {% if bucket_configs %}{% for config in bucket_configs %}{% if config.create %}gs://{{ config.bucket_name }}{% endif %}{% endfor %}{% else %}./mlflow-artifacts{% endif %}"]
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
       interval: 30s
@@ -885,21 +944,20 @@ services:
       - "{{ flags.airflow_params.get('airflow_port', 8080) }}:8080"
     environment:
       - AIRFLOW__CORE__EXECUTOR={{ flags.airflow_params.get('airflow_executor', 'LocalExecutor') }}
-      - AIRFLOW__DATABASE__SQL_ALCHEMY_CONN={% if flags.needs_airflow and flags.needs_postgres %}postgresql+psycopg2://{{ '${google_sql_user.airflow_user.name}' }}:{{ '${random_password.db_password.result}' }}@{{ '${google_sql_database_instance.postgres.public_ip_address}' }}:5432/{{ '${google_sql_database.airflow_db.name}' }}{% else %}sqlite:////opt/airflow/airflow.db{% endif %}
+      - AIRFLOW__DATABASE__SQL_ALCHEMY_CONN={% if flags.use_cloudsql %}postgresql+psycopg2://{{ '${google_sql_user.airflow_user.name}' }}:{{ '${random_password.db_password.result}' }}@{{ '${google_sql_database_instance.postgres.public_ip_address}' }}:5432/{{ '${google_sql_database.airflow_db.name}' }}{% elif flags.use_local_postgres %}postgresql+psycopg2://airflow:{{ '${random_password.db_password.result}' }}@localhost:5432/airflow{% else %}sqlite:////opt/airflow/airflow.db{% endif %}
       - AIRFLOW__CORE__FERNET_KEY={{ '${random_password.airflow_fernet_key.result}' }}
       - AIRFLOW__CORE__SECRET_KEY={{ '${random_password.airflow_secret_key.result}' }}
       - AIRFLOW__CORE__LOAD_EXAMPLES=False
       - AIRFLOW__API__SECRET_KEY={{ '${random_password.airflow_secret_key.result}' }}
-      - AIRFLOW__API__RBAC=True
+      # RBAC is handled by Simple Auth Manager in Airflow 3.0+
       - AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION=True
       - AIRFLOW__CORE__PARALLELISM={{ flags.airflow_params.get('airflow_parallelism', 4) }}
       - AIRFLOW__CORE__DAG_CONCURRENCY={{ flags.airflow_params.get('airflow_dag_concurrency', 2) }}
       - AIRFLOW__CORE__MAX_ACTIVE_RUNS_PER_DAG={{ flags.airflow_params.get('airflow_max_active_runs_per_dag', 2) }}
       - AIRFLOW__API__WORKERS={{ flags.airflow_params.get('airflow_webserver_workers', 2) }}
-      - AIRFLOW__API__AUTHENTICATE=True
-      - AIRFLOW__WEBSERVER__AUTHENTICATE=True
-      # Airflow 3.x uses default authentication - no custom backend needed
-      # DB migration and user creation are handled by airflow-init only
+      # Airflow 3.x uses Simple Auth Manager by default
+      # User creation is handled automatically through simple_auth_manager_users
+      - AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_USERS=admin:admin
     volumes:
       - /opt/airflow:/opt/airflow
     networks:
@@ -920,21 +978,20 @@ services:
     container_name: airflow-scheduler
     environment:
       - AIRFLOW__CORE__EXECUTOR={{ flags.airflow_params.get('airflow_executor', 'LocalExecutor') }}
-      - AIRFLOW__DATABASE__SQL_ALCHEMY_CONN={% if flags.needs_airflow and flags.needs_postgres %}postgresql+psycopg2://{{ '${google_sql_user.airflow_user.name}' }}:{{ '${random_password.db_password.result}' }}@{{ '${google_sql_database_instance.postgres.public_ip_address}' }}:5432/{{ '${google_sql_database.airflow_db.name}' }}{% else %}sqlite:////opt/airflow/airflow.db{% endif %}
+      - AIRFLOW__DATABASE__SQL_ALCHEMY_CONN={% if flags.use_cloudsql %}postgresql+psycopg2://{{ '${google_sql_user.airflow_user.name}' }}:{{ '${random_password.db_password.result}' }}@{{ '${google_sql_database_instance.postgres.public_ip_address}' }}:5432/{{ '${google_sql_database.airflow_db.name}' }}{% elif flags.use_local_postgres %}postgresql+psycopg2://airflow:{{ '${random_password.db_password.result}' }}@localhost:5432/airflow{% else %}sqlite:////opt/airflow/airflow.db{% endif %}
       - AIRFLOW__CORE__FERNET_KEY={{ '${random_password.airflow_fernet_key.result}' }}
       - AIRFLOW__CORE__SECRET_KEY={{ '${random_password.airflow_secret_key.result}' }}
       - AIRFLOW__CORE__LOAD_EXAMPLES=False
       - AIRFLOW__API__SECRET_KEY={{ '${random_password.airflow_secret_key.result}' }}
-      - AIRFLOW__API__RBAC=True
+      # RBAC is handled by Simple Auth Manager in Airflow 3.0+
       - AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION=True
       - AIRFLOW__CORE__PARALLELISM={{ flags.airflow_params.get('airflow_parallelism', 4) }}
       - AIRFLOW__CORE__DAG_CONCURRENCY={{ flags.airflow_params.get('airflow_dag_concurrency', 2) }}
       - AIRFLOW__CORE__MAX_ACTIVE_RUNS_PER_DAG={{ flags.airflow_params.get('airflow_max_active_runs_per_dag', 2) }}
       - AIRFLOW__API__WORKERS={{ flags.airflow_params.get('airflow_webserver_workers', 2) }}
-      - AIRFLOW__API__AUTHENTICATE=True
-      - AIRFLOW__WEBSERVER__AUTHENTICATE=True
-      # Airflow 3.x uses default authentication - no custom backend needed
-      # DB migration and user creation are handled by airflow-init only
+      # Airflow 3.x uses Simple Auth Manager by default
+      # User creation is handled automatically through simple_auth_manager_users
+      - AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_USERS=admin:admin
     volumes:
       - /opt/airflow:/opt/airflow
     networks:
@@ -955,20 +1012,20 @@ services:
     container_name: airflow-init
     environment:
       - AIRFLOW__CORE__EXECUTOR={{ flags.airflow_params.get('airflow_executor', 'LocalExecutor') }}
-      - AIRFLOW__DATABASE__SQL_ALCHEMY_CONN={% if flags.needs_airflow and flags.needs_postgres %}postgresql+psycopg2://{{ '${google_sql_user.airflow_user.name}' }}:{{ '${random_password.db_password.result}' }}@{{ '${google_sql_database_instance.postgres.public_ip_address}' }}:5432/{{ '${google_sql_database.airflow_db.name}' }}{% else %}sqlite:////opt/airflow/airflow.db{% endif %}
+      - AIRFLOW__DATABASE__SQL_ALCHEMY_CONN={% if flags.use_cloudsql %}postgresql+psycopg2://{{ '${google_sql_user.airflow_user.name}' }}:{{ '${random_password.db_password.result}' }}@{{ '${google_sql_database_instance.postgres.public_ip_address}' }}:5432/{{ '${google_sql_database.airflow_db.name}' }}{% elif flags.use_local_postgres %}postgresql+psycopg2://airflow:{{ '${random_password.db_password.result}' }}@localhost:5432/airflow{% else %}sqlite:////opt/airflow/airflow.db{% endif %}
       - AIRFLOW__CORE__FERNET_KEY={{ '${random_password.airflow_fernet_key.result}' }}
       - AIRFLOW__CORE__SECRET_KEY={{ '${random_password.airflow_secret_key.result}' }}
       - AIRFLOW__CORE__LOAD_EXAMPLES=False
       - AIRFLOW__API__SECRET_KEY={{ '${random_password.airflow_secret_key.result}' }}
-      - AIRFLOW__API__RBAC=True
+      # RBAC is handled by Simple Auth Manager in Airflow 3.0+
       - AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION=True
       - AIRFLOW__CORE__PARALLELISM={{ flags.airflow_params.get('airflow_parallelism', 4) }}
       - AIRFLOW__CORE__DAG_CONCURRENCY={{ flags.airflow_params.get('airflow_dag_concurrency', 2) }}
       - AIRFLOW__CORE__MAX_ACTIVE_RUNS_PER_DAG={{ flags.airflow_params.get('airflow_max_active_runs_per_dag', 2) }}
       - AIRFLOW__API__WORKERS={{ flags.airflow_params.get('airflow_webserver_workers', 2) }}
-      - AIRFLOW__API__AUTHENTICATE=True
-      - AIRFLOW__WEBSERVER__AUTHENTICATE=True
-      # Airflow 3.x uses default authentication - no custom backend needed
+      # Airflow 3.x uses Simple Auth Manager by default
+      # User creation is handled automatically through simple_auth_manager_users
+      - AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_USERS=admin:admin
       - _AIRFLOW_DB_MIGRATE=true
     volumes:
       - /opt/airflow:/opt/airflow
@@ -976,7 +1033,8 @@ services:
       - mlflow-network
     restart: "no"
     depends_on: []
-    command: ["/bin/bash", "-c", "airflow db migrate && airflow users create --username {{ flags.airflow_params.get('airflow_admin_user', 'admin') }} --firstname Admin --lastname User --email admin@example.com --password {{ flags.airflow_params.get('airflow_admin_password', 'admin') }} && airflow users set-role {{ flags.airflow_params.get('airflow_admin_user', 'admin') }} --role admin"]
+    entrypoint: "/bin/bash"
+    command: ["-c", "airflow db migrate"]
 {% endif %}
 
 volumes:
@@ -2105,7 +2163,7 @@ User=$CURRENT_USER
 Group=$CURRENT_USER
 WorkingDirectory=/home/$CURRENT_USER/deployml/docker
 Environment=MLFLOW_BACKEND_STORE_URI={% if flags.needs_postgres %}postgresql+psycopg2://{{ flags.first_tool_name }}:{{ '${random_password.db_password.result}' }}@{{ '${google_sql_database_instance.postgres.public_ip_address}' }}:5432/{{ '${google_sql_database.db.name}' }}{% else %}sqlite:///mlflow.db{% endif %}
-Environment=MLFLOW_DEFAULT_ARTIFACT_ROOT={% if flags.mlflow_params.get('artifact_bucket') %}gs://{{ flags.mlflow_params.artifact_bucket }}{% else %}./mlflow-artifacts{% endif %}
+Environment=MLFLOW_DEFAULT_ARTIFACT_ROOT={% if bucket_configs %}{% for config in bucket_configs %}{% if config.create %}gs://{{ config.bucket_name }}{% endif %}{% endfor %}{% else %}./mlflow-artifacts{% endif %}
 {% if flags.needs_feast and flags.needs_postgres %}
 # FEAST PostgreSQL environment variables for Docker Compose
 Environment=FEAST_REGISTRY_TYPE=sql
@@ -2119,7 +2177,7 @@ Environment=FEAST_ONLINE_STORE_PASSWORD={% if flags.needs_postgres %}{{ '${rando
 Environment=FEAST_OFFLINE_STORE_TYPE=bigquery
 Environment=FEAST_OFFLINE_STORE_PROJECT={{ project_id }}
 Environment=FEAST_OFFLINE_STORE_DATASET={{ flags.feast_params.get('bigquery_dataset', 'feast_offline_store') }}
-Environment=FEAST_ARTIFACT_BUCKET={{ flags.mlflow_params.get('artifact_bucket', '') }}
+Environment=FEAST_ARTIFACT_BUCKET={% if bucket_configs %}{% for config in bucket_configs %}{% if config.create %}{{ config.bucket_name }}{% endif %}{% endfor %}{% else %}{% endif %}
 Environment=GOOGLE_CLOUD_PROJECT={{ project_id }}
 Environment=USE_POSTGRES={% if flags.needs_postgres %}true{% else %}false{% endif %}
 Environment=FEAST_PORT={{ flags.feast_params.get('feast_port', 6566) }}
@@ -2309,15 +2367,20 @@ ENV_EOF
     {% endif %}
     {% if flags.needs_airflow %}
     echo "🪂 Airflow Web UI will be available at: http://$EXTERNAL_IP:{{ flags.airflow_params.get('airflow_port', 8080) }}"
-    echo "🔑 Airflow Login: Username: {{ flags.airflow_params.get('airflow_admin_user', 'admin') }}, Password: {{ flags.airflow_params.get('airflow_admin_password', 'admin') }}"
+    echo "🔑 Airflow Login: Username: {{ flags.airflow_params.get('airflow_admin_user', 'admin') }}, Password: Generated by Simple Auth Manager"
+    echo "💡 To find the password, run: docker logs airflow-webserver | grep 'Password for user'"
     echo "📊 Airflow Health Check: http://$EXTERNAL_IP:{{ flags.airflow_params.get('airflow_port', 8080) }}/health"
     {% endif %}
     echo "🔧 SSH into the VM with: gcloud compute ssh {{ flags.mlflow_params.vm_name }} --zone={{ zone }}"
     echo "🐳 Manage containers: docker ps, docker logs mlflow-server, docker logs fastapi-proxy{% if flags.needs_feast %}, docker logs feast-server{% endif %}{% if flags.needs_airflow %}, docker logs airflow-webserver, docker logs airflow-scheduler{% endif %}"
     echo "🔧 Docker Compose: docker compose up -d, docker compose down, docker compose restart"
     echo "Backend store: {{ 'PostgreSQL' if flags.needs_postgres else 'SQLite' }}"
-    {% if flags.mlflow_params.get('artifact_bucket') %}
-    echo "Artifact store: gs://{{ flags.mlflow_params.artifact_bucket }}"
+    {% if bucket_configs %}
+    {% for config in bucket_configs %}
+    {% if config.create %}
+    echo "Artifact store: gs://{{ config.bucket_name }}"
+    {% endif %}
+    {% endfor %}
     {% endif %}
     
     # Final verification of created files
@@ -2577,7 +2640,7 @@ output "airflow_deployment_info" {
     separate_database = var.airflow_separate_database
     executor = "{{ flags.airflow_params.get('airflow_executor', 'LocalExecutor') }}"
     admin_user = "{{ flags.airflow_params.get('airflow_admin_user', 'admin') }}"
-    admin_password = "{{ flags.airflow_params.get('airflow_admin_password', 'admin') }}"
+    admin_password = "Generated by Simple Auth Manager - check 'docker logs airflow-webserver'"
     parallelism = {{ flags.airflow_params.get('airflow_parallelism', 4) }}
     dag_concurrency = {{ flags.airflow_params.get('airflow_dag_concurrency', 2) }}
     max_active_runs_per_dag = {{ flags.airflow_params.get('airflow_max_active_runs_per_dag', 2) }}
@@ -2613,10 +2676,25 @@ output "ssh_command" {
 }
 
 # Artifact bucket output  
-{% if flags.mlflow_params.get("artifact_bucket") %}
-output "bucket_name" {
-  value = "{{ flags.mlflow_params.artifact_bucket }}"
+{% if bucket_configs %}
+{% for config in bucket_configs %}
+output "bucket_name_{{ config.stage }}" {
+  value = "{{ config.bucket_name }}"
+  description = "Name of the {{ config.stage }} artifact bucket"
 }
+
+output "bucket_created_{{ config.stage }}" {
+  value = {{ config.create | lower }}
+  description = "Whether the {{ config.stage }} artifact bucket was created by Terraform"
+}
+
+output "bucket_resource_{{ config.stage }}" {
+  value = {{ config.create | lower }} ? google_storage_bucket.{{ config.stage }}_{{ config.tool }}_artifact[0].name : "No bucket created"
+  description = "Name of the created {{ config.stage }} bucket resource (if any)"
+}
+{% endfor %}
+{% else %}
+# No bucket configurations found
 {% endif %}
 
 # Zone output
@@ -2635,14 +2713,15 @@ output "iam_debug_info" {
   value = {
     service_account_id = google_service_account.vm_service_account.account_id
     project_id         = var.project_id
-    {% for stage in stack %}
-      {% for stage_name, tool in stage.items() %}
-        {% if tool.name == "mlflow" and tool.params.get("artifact_bucket") %}
-    artifact_bucket    = "{{ tool.params.artifact_bucket }}"
-    iam_bindings_created = "yes - storage permissions applied"
-        {% endif %}
-      {% endfor %}
+    {% if bucket_configs %}
+    {% for config in bucket_configs %}
+    artifact_bucket_{{ config.stage }} = "{{ config.bucket_name }}"
+    iam_bindings_created_{{ config.stage }} = "yes - storage permissions applied"
     {% endfor %}
+    {% else %}
+    artifact_buckets = "none configured"
+    iam_bindings_created = "no storage permissions needed"
+    {% endif %}
   }
 }
 
@@ -2656,7 +2735,7 @@ module "{{ stage_name }}_{{ tool.name }}" {
   region              = var.region
   bigquery_dataset    = var.bigquery_dataset
   create_bigquery_dataset = var.create_bigquery_dataset
-  artifact_bucket     = {% if create_artifact_bucket %}google_storage_bucket.artifact_tracking_mlflow_artifact.name{% else %}var.artifact_bucket{% endif %}
+  artifact_bucket     = {% if bucket_configs %}{% for config in bucket_configs %}{% if config.create %}google_storage_bucket.{{ config.stage }}_{{ config.tool }}_artifact[0].name{% endif %}{% endfor %}{% else %}""{% endif %}
   feast_port         = var.feast_port
   feast_database_name = var.feast_database_name
   feast_database_user = var.feast_database_user
