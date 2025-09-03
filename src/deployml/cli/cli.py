@@ -327,7 +327,7 @@ def deploy(
     if cloud == "gcp":
         project_id = config["provider"]["project_id"]
         # Only run if google-cloud-storage is available
-        # Find artifact_bucket in stack config
+        # Simplified bucket logic - respect user settings
         for stage in config.get("stack", []):
             for stage_name, tool in stage.items():
                 if stage_name == "artifact_tracking" and tool.get("name") in [
@@ -336,41 +336,18 @@ def deploy(
                 ]:
                     if "params" not in tool:
                         tool["params"] = {}
+
+                    # If no bucket specified, generate one
                     if not tool["params"].get("artifact_bucket"):
                         new_bucket = generate_bucket_name(project_id)
                         typer.echo(
-                            f" No bucket specified for artifact_tracking, using generated bucket name: {new_bucket}"
+                            f"📦 No bucket specified for artifact_tracking, using generated bucket name: {new_bucket}"
                         )
                         tool["params"]["artifact_bucket"] = new_bucket
-                        # Only set create_artifact_bucket if neither is present
-                        if (
-                            "create_bucket" not in tool["params"]
-                            and "create_artifact_bucket" not in tool["params"]
-                        ):
+                        # Set create_artifact_bucket to True for generated buckets
+                        if "create_artifact_bucket" not in tool["params"]:
                             tool["params"]["create_artifact_bucket"] = True
-                    else:
-                        base_bucket = tool["params"]["artifact_bucket"]
-                        if bucket_exists(base_bucket, project_id):
-                            typer.echo(
-                                f"Using specified bucket name (already exists): {base_bucket}"
-                            )
-                            # Only set create_artifact_bucket if neither is present
-                            if (
-                                "create_bucket" not in tool["params"]
-                                and "create_artifact_bucket"
-                                not in tool["params"]
-                            ):
-                                tool["params"]["create_artifact_bucket"] = False
-                        else:
-                            typer.echo(
-                                f"Using specified bucket name: {base_bucket}"
-                            )
-                            if (
-                                "create_bucket" not in tool["params"]
-                                and "create_artifact_bucket"
-                                not in tool["params"]
-                            ):
-                                tool["params"]["create_artifact_bucket"] = True
+
                     # Set use_postgres param based on backend_store_uri (mlflow only)
                     if tool.get("name") == "mlflow":
                         backend_uri = tool["params"].get(
@@ -401,7 +378,10 @@ def deploy(
         cloud == "gcp"
         and deployment_type == "cloud_run"
         and any(
-            tool.get("name") == "mlflow" and tool.get("params", {}).get("backend_store_uri", "").startswith("postgresql")
+            tool.get("name") == "mlflow"
+            and tool.get("params", {})
+            .get("backend_store_uri", "")
+            .startswith("postgresql")
             for stage in stack
             for tool in stage.values()
         )
@@ -412,24 +392,54 @@ def deploy(
             for stage in stack
             for tool in stage.values()
         ):
-            stack.append({"cloud_sql_postgres": {"name": "cloud_sql_postgres", "params": {}}})
-            
+            stack.append(
+                {
+                    "cloud_sql_postgres": {
+                        "name": "cloud_sql_postgres",
+                        "params": {},
+                    }
+                }
+            )
+
     typer.echo("📦 Copying module templates...")
     copy_modules_to_workspace(
-        DEPLOYML_MODULES_DIR, stack=stack, deployment_type=deployment_type, cloud=cloud
+        DEPLOYML_MODULES_DIR,
+        stack=stack,
+        deployment_type=deployment_type,
+        cloud=cloud,
     )
+    # --- UNIFIED BUCKET CONFIGURATION APPROACH ---
+    # Collect all bucket configurations in a structured way (similar to VM creation)
+    bucket_configs = []
+    for stage in stack:
+        for stage_name, tool in stage.items():
+            if tool.get("params", {}).get("artifact_bucket"):
+                bucket_name = tool["params"]["artifact_bucket"]
+                create_bucket = tool["params"].get(
+                    "create_artifact_bucket", True
+                )
 
-    # Ensure all stages use Cloud SQL if any stage needs it
-    needs_postgres = any(
-        tool.get("params", {}).get("backend_store_uri", "").startswith("postgresql")
-        for stage in stack
-        for tool in stage.values()
-    )
-    if needs_postgres:
-        for stage in stack:
-            for tool in stage.values():
-                tool.setdefault("params", {})
-                tool["params"]["backend_store_uri"] = "postgresql"
+                # Check if bucket already exists
+                bucket_exists_flag = bucket_exists(bucket_name, project_id)
+
+                bucket_configs.append(
+                    {
+                        "stage": stage_name,
+                        "tool": tool["name"],
+                        "bucket_name": bucket_name,
+                        "create": create_bucket,
+                        "exists": bucket_exists_flag,
+                    }
+                )
+
+                typer.echo(
+                    f"📦 Bucket config: {stage_name}/{tool['name']} -> {bucket_name} (create: {create_bucket}, exists: {bucket_exists_flag})"
+                )
+
+    # Simple boolean flag for backward compatibility
+    create_artifact_bucket = any(config["create"] for config in bucket_configs)
+
+    typer.echo(f"🔧 Unified bucket creation: {create_artifact_bucket}")
 
     env = Environment(loader=FileSystemLoader(TEMPLATE_DIR))
     # PATCH: Use wandb_main.tf.j2 or mlflow_main.tf.j2 for cloud_run if present
@@ -465,13 +475,6 @@ def deploy(
         f"{cloud}/{deployment_type}/terraform.tfvars.j2"
     )
 
-    # Find if any tool in the stack has create_artifact_bucket set
-    create_artifact_bucket = False
-    for stage in stack:
-        for stage_name, tool in stage.items():
-            if tool.get("params", {}).get("create_artifact_bucket", False):
-                create_artifact_bucket = True
-
     # Render templates
     if deployment_type == "cloud_vm":
         main_tf = main_template.render(
@@ -479,6 +482,7 @@ def deploy(
             stack=stack,
             deployment_type=deployment_type,
             create_artifact_bucket=create_artifact_bucket,
+            bucket_configs=bucket_configs,  # ← Pass structured bucket configs
             project_id=project_id,
             region=region,
             zone=config["provider"].get("zone", f"{region}-a"),
@@ -489,6 +493,7 @@ def deploy(
             stack=stack,
             deployment_type=deployment_type,
             create_artifact_bucket=create_artifact_bucket,
+            bucket_configs=bucket_configs,  # ← Pass structured bucket configs
             project_id=project_id,
         )
     variables_tf = var_template.render(
@@ -581,7 +586,9 @@ def deploy(
         import re as _re
 
         match = _re.search(r"~(\d+)", estimated_time)
-        minutes = int(match.group(1)) if match else 8  # Increased default for API operations
+        minutes = (
+            int(match.group(1)) if match else 8
+        )  # Increased default for API operations
         result_code = run_terraform_with_loading_bar(
             ["terraform", "apply", "-auto-approve"],
             DEPLOYML_TERRAFORM_DIR,
@@ -715,7 +722,9 @@ def destroy(
     typer.echo(f"🌐 Project: {project_id}")
     typer.echo("This will permanently delete all resources!")
 
-    if not (yes or typer.confirm("Are you sure you want to destroy all resources?")):
+    if not (
+        yes or typer.confirm("Are you sure you want to destroy all resources?")
+    ):
         typer.echo("❌ Destroy cancelled")
         return
 

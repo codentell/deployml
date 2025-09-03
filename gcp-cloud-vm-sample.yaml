@@ -1,7 +1,7 @@
 name: gcp-mlops-stack-mlflow-vm
 provider:
   name: gcp
-  project_id: hatchet10
+  project_id: hatchet12
   region: us-west2
   zone: us-west2-a
 
@@ -32,8 +32,8 @@ stack:
       name: mlflow
       params: 
         # artifact_bucket: mlflow-artifact-bucket-vm-54321
-        artifact_bucket: mlflow-artifact-bucket-postgres-12345 # for postgres backend
-        create_bucket: true
+        artifact_bucket: mlflow-artifact-bucket-postgres-2
+        create_artifact_bucket: true
   - model_registry:
       name: mlflow
       params: 
@@ -50,7 +50,7 @@ stack:
         offline_store_type: bigquery
         bigquery_dataset: feast_offline_store
         create_bigquery_dataset: true
-        sample_data: true  # Set to true to create sample sales data table
+        sample_data: false  # Set to true to create sample sales data table
   - model_monitoring:
       name: grafana
       params: 
@@ -73,6 +73,7 @@ stack:
         airflow_admin_user: admin
         airflow_admin_password: admin123
         airflow_executor: LocalExecutor
-        airflow_parallelism: 32
-        airflow_dag_concurrency: 16
-        airflow_max_active_runs_per_dag: 16
+        airflow_parallelism: 4
+        airflow_dag_concurrency: 2
+        airflow_max_active_runs_per_dag: 2
+        airflow_webserver_workers: 1  # Set to 1 worker to fix child process issues
