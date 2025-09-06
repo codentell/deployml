@@ -1,5 +1,5 @@
 site_name: deployml
-site_url: https://deployml.com
+site_url: https://codentell.github.io/deployml/
 theme:
   name: material
   font:
