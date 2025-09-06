@@ -1,0 +1,75 @@
+site_name: deployml
+site_url: https://deployml.com
+theme:
+  name: material
+  font:
+    text: Roboto
+    code: Roboto Mono
+  palette:
+    # Dark Mode
+    - scheme: slate
+      toggle:
+        icon: material/weather-sunny
+        name: Dark mode
+      primary: deep purple
+      accent: deep purple
+
+    # Light Mode
+    - scheme: default
+      toggle:
+        icon: material/weather-night
+        name: Light mode
+      primary: deep purple
+      accent: deep purple
+  features:
+    - content.tabs.link
+    - content.code.annotate
+    - content.code.copy
+    - announce.dismiss
+    - navigation.tabs
+    - navigation.instant
+    - navigation.instant.prefetch
+    - navigation.instant.preview
+    - navigation.instant.progress
+    - navigation.path
+    - navigation.sections
+    - navigation.top
+    - navigation.tracking
+    - search.suggest
+    - toc.follow
+
+markdown_extensions:
+  - attr_list
+  - pymdownx.emoji:
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+      emoji_generator: !!python/name:material.extensions.emoji.to_svg
+
+markdown_extensions:
+  - pymdownx.highlight:
+      anchor_linenums: true
+      line_spans: __span
+      pygments_lang_class: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.superfences
+
+repo_name: codentell/deployml
+repo_url: https://github.com/codentell/deployml
+
+nav:
+- Getting Started: 
+  - Welcome to deployml: index.md
+  - Installation: installation.md
+  - Contributing: contributing.md  
+  - Changelog: changelog.md
+- Features: 
+  - Overview: features/overview.md
+  - MLOps Components: features/pipeline.md
+  - Cost Estimates: features/costs.md
+- Tutorials:
+  - Overview: tutorials/overview.md
+  - GCP: tutorials/gcp.md
+  - AWS: tutorials/aws.md
+- API Reference:
+  - Overview: api/overview.md
+- FAQ: faq.md
