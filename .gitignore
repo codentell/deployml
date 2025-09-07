@@ -11,3 +11,6 @@ data_local
 working_Version
 square_duckling 
 data/us_house_Sales_data.csv
+
+# MkDocs build output
+site/
