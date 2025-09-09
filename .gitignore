@@ -14,3 +14,4 @@ data/us_house_Sales_data.csv
 
 # MkDocs build output
 site/
+dist/
