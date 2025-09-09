@@ -4,7 +4,7 @@ Welcome to deployml, a python library for deploying an end-to-end machine learni
 
 ## Why was deployml created?
 
-Because...
+Because there is a lack of infra resources ...
 
 ## Who is deployml for?
 
