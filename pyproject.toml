@@ -3,7 +3,9 @@ name = "deployml"
 version = "0.0.1"
 description = "Infra for academia"
 authors = [
-    {name = "Your Name",email = "you@example.com"}
+    {name = "Drew Hoang", email = "codentell@gmail.com"}
+    {name = "Jarvin Bayona", email = "jarvin.bayona@gmail.com" }
+    {name = "Grant Nitta", email = "gtnitta@gmail.com" } 
 ]
 readme = "README.md"
 requires-python = ">=3.11"
