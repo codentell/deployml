@@ -6,7 +6,8 @@ description = "Infra for academia"
 authors = [
     {name = "Drew Hoang", email = "codentell@gmail.com"},
     {name = "Jarvin Bayona", email = "jarvin.bayona@gmail.com"},
-    {name = "Grant Nitta", email = "gtnitta@gmail.com"}
+    {name = "Grant Nitta", email = "gtnitta@gmail.com"},
+    {name = "Robert Clements", email = "rclements@usfca.edu"}
 ]
 readme = "README.md"
 requires-python = ">=3.11"
