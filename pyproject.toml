@@ -1,6 +1,6 @@
 
 [project]
-name = "mldeploy"
+name = "deployml-core"
 version = "0.0.1"
 description = "Infra for academia"
 authors = [
