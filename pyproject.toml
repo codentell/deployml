@@ -16,7 +16,11 @@ dependencies = [
     "pyyaml", 
     "jinja2",
     "rich",
-    "google-cloud-storage>=3.1.1,<4.0.0"
+    "google-cloud-storage>=3.1.1,<4.0.0",
+    "ipython>=9.0.0",
+    "jupyter>=1.0.0",
+    "requests>=2.28.0",
+    "pandas>=2.2.1"
 ]
 
 [project.scripts]
