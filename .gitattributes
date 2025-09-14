@@ -1,0 +1,21 @@
+# Count Python and HCL only
+*.py linguist-detectable=true
+
+# Ignore notebooks
+*.ipynb linguist-documentation
+
+# Ignore configs and data
+*.yaml linguist-documentation
+*.yml linguist-documentation
+*.json linguist-documentation
+*.csv linguist-documentation
+*.parquet linguist-documentation
+
+# Ignore templates
+*.jinja linguist-documentation
+*.j2 linguist-documentation
+*.tpl linguist-documentation
+*.tf linguist-documentation
+
+# Ignore misc
+*.md linguist-documentation
