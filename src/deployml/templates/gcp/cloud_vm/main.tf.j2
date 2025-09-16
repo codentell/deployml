@@ -1933,12 +1933,13 @@ model_info = {
 MODEL_CHECK_INTERVAL = int(os.getenv("MODEL_CHECK_INTERVAL", "300"))  # 5 minutes default
 AUTO_REFRESH_ENABLED = os.getenv("AUTO_REFRESH_ENABLED", "true").lower() == "true"
 
-# Pydantic model for prediction request
-class PredictionRequest(BaseModel):
-    sepal_length: float
-    sepal_width: float
-    petal_length: float
-    petal_width: float
+# Pydantic models for generic prediction
+from typing import Any, Dict, List, Union
+
+class GenericPredictionRequest(BaseModel):
+    """Generic prediction request supporting either a single record (dict)
+    or a list of records (list of dicts). Use the 'inputs' field."""
+    inputs: Union[Dict[str, Any], List[Dict[str, Any]]]
 
 async def load_mlflow_model(model_name: str = None) -> bool:
     """Load or reload the MLflow model. Returns True if successful."""
@@ -1956,7 +1957,7 @@ async def load_mlflow_model(model_name: str = None) -> bool:
     try:
         logger.info(f"Loading/refreshing MLflow model: {model_name}")
         mlflow_tracking_uri = os.getenv("MLFLOW_TRACKING_URI", MLFLOW_BASE_URL)
-        experiment_name = os.getenv("EXPERIMENT_NAME", "iris_experiment")
+        experiment_name = os.getenv("EXPERIMENT_NAME", os.getenv("MODEL_EXPERIMENT", "default_experiment"))
         
         mlflow.set_tracking_uri(mlflow_tracking_uri)
         mlflow.set_experiment(experiment_name)
@@ -1987,12 +1988,19 @@ async def load_mlflow_model(model_name: str = None) -> bool:
         model_uri = f"models:/{model_name}/latest"
         new_model = mlflow.pyfunc.load_model(model_uri)
         
-        feature_names = [
-            "sepal length",
-            "sepal width", 
-            "petal length",
-            "petal width",
-        ]
+        # Attempt to derive expected feature names from model signature; fallback to None
+        try:
+            from mlflow.models import get_model_info
+            info = get_model_info(model_uri)
+            sig = info.signature
+            if sig and sig.inputs and hasattr(sig.inputs, 'inputs'):
+                feature_names = [inp.name for inp in sig.inputs.inputs if hasattr(inp, 'name')]
+            elif sig and sig.inputs:
+                feature_names = [getattr(inp, 'name', None) for inp in sig.inputs if getattr(inp, 'name', None)]
+            else:
+                feature_names = None
+        except Exception:
+            feature_names = None
         
         # Update model and info atomically
         model = new_model
@@ -2236,8 +2244,11 @@ async def root():
     return HTMLResponse(content=html_content)
 
 @app.post("/predict")
-async def predict(data: PredictionRequest):
-    """Predict using the loaded MLflow model and automatically save to MLflow registry if needed"""
+async def predict(data: GenericPredictionRequest):
+    """Predict using the loaded MLflow model with generic inputs.
+    Body:
+    { "inputs": {..} } or { "inputs": [ {..}, ... ] }
+    """
     if model is None:
         raise HTTPException(
             status_code=503, 
@@ -2245,32 +2256,32 @@ async def predict(data: PredictionRequest):
         )
     
     try:
-        # Convert request to DataFrame
-        input_data = pd.DataFrame([data.dict()])
-        input_data = input_data[
-            ["sepal_length", "sepal_width", "petal_length", "petal_width"]
-        ]
+        # Normalize inputs to DataFrame
+        records = data.inputs if isinstance(data.inputs, list) else [data.inputs]
+        input_data = pd.DataFrame(records)
         
-        # Rename columns to match training data
-        input_data.columns = feature_names
+        # If we know expected feature order, align and validate
+        if feature_names:
+            missing = [f for f in feature_names if f not in input_data.columns]
+            if missing:
+                raise HTTPException(status_code=400, detail=f"Missing required features: {missing}")
+            input_data = input_data[feature_names]
         
         # Make prediction
         predictions = model.predict(input_data)
         
         # Create MLflow run to log prediction data
         mlflow_tracking_uri = os.getenv("MLFLOW_TRACKING_URI", MLFLOW_BASE_URL)
-        experiment_name = os.getenv("EXPERIMENT_NAME", "iris_experiment")
+        experiment_name = os.getenv("EXPERIMENT_NAME", os.getenv("MODEL_EXPERIMENT", "default_experiment"))
         
         mlflow.set_tracking_uri(mlflow_tracking_uri)
         mlflow.set_experiment(experiment_name)
         
         with mlflow.start_run(run_name=f"prediction_{datetime.now().strftime('%Y%m%d_%H%M%S')}"):
-            # Log prediction inputs
+            # Log minimal metadata
             mlflow.log_params({
-                "sepal_length": data.sepal_length,
-                "sepal_width": data.sepal_width,
-                "petal_length": data.petal_length,
-                "petal_width": data.petal_width,
+                "num_records": len(input_data),
+                "num_features": len(input_data.columns),
                 "model_name": model_info.get("name", "unknown"),
                 "model_version": model_info.get("version", "unknown"),
                 "deployment": "containerized"
@@ -2310,10 +2321,15 @@ async def predict(data: PredictionRequest):
         
         return {
             "predictions": predictions.tolist(),
-            "model_info": "MLflow loaded model",
-            "input_features": data.dict(),
+            "model": {
+                "name": model_info.get("name"),
+                "version": model_info.get("version"),
+            },
+            "feature_order": feature_names,
+            "records": len(input_data),
             "deployment": "containerized",
-            "mlflow_run_id": mlflow.active_run().info.run_id if mlflow.active_run() else None
+            "mlflow_run_id": mlflow.active_run().info.run_id if mlflow.active_run() else None,
+            "timestamp": datetime.now().isoformat()
         }
         
     except Exception as e:
@@ -2380,27 +2396,27 @@ async def save_model():
         )
 
 @app.post("/test-data-processing")
-async def test_data_processing(data: PredictionRequest):
-    """Test endpoint to debug data processing without making predictions"""
+async def test_data_processing(data: GenericPredictionRequest):
+    """Test endpoint to debug request-to-DataFrame processing for generic inputs"""
     try:
-        # Convert request to DataFrame
-        input_data = pd.DataFrame([data.dict()])
-        input_data = input_data[
-            ["sepal_length", "sepal_width", "petal_length", "petal_width"]
-        ]
+        records = data.inputs if isinstance(data.inputs, list) else [data.inputs]
+        input_data = pd.DataFrame(records)
         
-        # Ensure data types are numeric
-        for col in input_data.columns:
-            input_data[col] = pd.to_numeric(input_data[col], errors='coerce')
-        
-        # Rename columns to match training data
-        input_data.columns = feature_names if feature_names else ["sepal_length", "sepal_width", "petal_length", "petal_width"]
+        # Align to expected feature order if known
+        aligned = None
+        missing = []
+        if feature_names:
+            missing = [f for f in feature_names if f not in input_data.columns]
+            if not missing:
+                aligned = input_data[feature_names]
         
         return {
-            "input_data_types": input_data.dtypes.to_dict(),
-            "input_data_values": input_data.values.tolist(),
-            "input_data_shape": input_data.shape,
-            "feature_names": feature_names,
+            "columns": input_data.columns.tolist(),
+            "shape": list(input_data.shape),
+            "sample": input_data.head(5).to_dict(orient="records"),
+            "feature_names_expected": feature_names,
+            "missing_features": missing,
+            "aligned_preview": (aligned.head(5).to_dict(orient="records") if aligned is not None else None),
             "model_loaded": model is not None,
             "model_type": str(type(model)) if model is not None else None
         }
