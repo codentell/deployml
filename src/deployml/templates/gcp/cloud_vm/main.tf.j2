@@ -935,6 +935,33 @@ services:
       start_period: 60s
 {% endif %}
 
+{% if flags.needs_feast %}
+
+  feast-fastapi:
+    build:
+      context: ./feast-fastapi
+      dockerfile: Dockerfile
+    container_name: feast-fastapi-server
+    ports:
+      - "9000:8000"
+    env_file:
+      - ./feast_fastapi_environment.env
+    volumes:
+      - feast-fastapi-data:/app/feast-fastapi-data
+    networks:
+      - mlflow-network
+    restart: unless-stopped
+    depends_on:
+      feast:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+{% endif %}
+
 {% if flags.needs_airflow %}
 
   airflow-webserver:
@@ -1044,7 +1071,8 @@ volumes:
   grafana-config:
   grafana-logs:{% endif %}{% if flags.needs_feast %}
   feast-data:
-  feast-config:{% endif %}
+  feast-config:{% endif %}{% if flags.needs_feast %}
+  feast-fastapi-data:{% endif %}
 
 networks:
   mlflow-network:
@@ -1286,7 +1314,7 @@ max_apply_retries=3
 apply_retry_count=0
 
 while [ $apply_retry_count -lt $max_apply_retries ]; do
-    if feast apply; then
+    if feast apply --skip-source-validation; then
         echo "✅ Feature definitions applied successfully"
         break
     else
@@ -1340,9 +1368,7 @@ online_store:
   path: data/online_store.db
 {% endif %}
 offline_store:
-  type: bigquery
-  project_id: $FEAST_OFFLINE_STORE_PROJECT
-  dataset: $FEAST_OFFLINE_STORE_DATASET
+  type: file
 entity_key_serialization_version: 3
 FEAST_CONFIG_EOF
 
@@ -1475,6 +1501,388 @@ driver_activity_v1 = FeatureService(
     )
 {% endif %}
 FEAST_FEATURES_EOF
+
+    # Create FEAST FastAPI service
+    echo "Creating FEAST FastAPI service..."
+    mkdir -p /home/$CURRENT_USER/deployml/docker/feast-fastapi
+    
+    # Create FEAST FastAPI Dockerfile
+    cat > /home/$CURRENT_USER/deployml/docker/feast-fastapi/Dockerfile << 'FEAST_FASTAPI_DOCKERFILE_EOF'
+FROM python:3.10-slim
+
+# Set work directory
+WORKDIR /app
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    gcc \
+    g++ \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Python dependencies
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy application code
+COPY . .
+
+# Set environment variables
+ENV PYTHONPATH=/app
+ENV FEAST_FASTAPI_PORT=8000
+
+# Expose port
+EXPOSE 8000
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
+    CMD curl -f http://localhost:8000/health || exit 1
+
+# Use entrypoint script
+COPY entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
+ENTRYPOINT ["/entrypoint.sh"]
+FEAST_FASTAPI_DOCKERFILE_EOF
+
+    # Create FEAST FastAPI requirements.txt
+    cat > /home/$CURRENT_USER/deployml/docker/feast-fastapi/requirements.txt << 'FEAST_FASTAPI_REQUIREMENTS_EOF'
+fastapi==0.110.0
+uvicorn==0.34.0
+feast[gcp]==0.50.0
+pandas==2.3.1
+numpy==2.2.2
+requests==2.32.3
+psycopg2-binary==2.9.10
+sqlalchemy==2.0.30
+google-cloud-storage==2.17.0
+google-cloud-bigquery==3.15.0
+pydantic==2.10.6
+FEAST_FASTAPI_REQUIREMENTS_EOF
+
+    # Create FEAST FastAPI main application
+    cat > /home/$CURRENT_USER/deployml/docker/feast-fastapi/main.py << 'FEAST_FASTAPI_MAIN_EOF'
+import os
+import json
+import logging
+from datetime import datetime
+from typing import Dict, List, Optional, Any
+from contextlib import asynccontextmanager
+
+from fastapi import FastAPI, HTTPException, Depends
+from pydantic import BaseModel
+import requests
+import pandas as pd
+import numpy as np
+
+# Setup logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# Configuration
+FEAST_SERVER_URL = os.getenv("FEAST_SERVER_URL", "http://feast-server:6566")
+FEAST_FASTAPI_PORT = int(os.getenv("FEAST_FASTAPI_PORT", "8000"))
+PROJECT_ID = "{{ project_id }}"
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup
+    logger.info("🚀 Starting FEAST FastAPI service...")
+    
+    # Check FEAST server connection
+    try:
+        response = requests.get(f"{FEAST_SERVER_URL}/health", timeout=5)
+        feast_available = response.status_code == 200
+        logger.info(f"FEAST Server: {'✅ Available' if feast_available else '❌ Unavailable'}")
+    except Exception as e:
+        logger.error(f"FEAST Server: ❌ Connection failed: {e}")
+        feast_available = False
+    
+    if not feast_available:
+        logger.warning("⚠️ FEAST server not available - some features may not work")
+    
+    logger.info("🎯 FEAST FastAPI Ready!")
+    
+    yield
+    
+    # Shutdown
+    logger.info("🛑 Shutting down FEAST FastAPI...")
+    logger.info("✅ Shutdown complete")
+
+app = FastAPI(
+    title="FEAST FastAPI Service",
+    description="HTTP API wrapper for FEAST feature store",
+    version="1.0.0",
+    lifespan=lifespan
+)
+
+# =============================================================================
+# PYDANTIC MODELS
+# =============================================================================
+
+class FeatureRequest(BaseModel):
+    project: str
+    entities: Dict[str, List[Any]]
+    features: List[str]
+
+class FeatureResponse(BaseModel):
+    project: str
+    status: str
+    features: Dict[str, List[Any]]
+    metadata: Dict[str, Any]
+
+class ProjectInfo(BaseModel):
+    name: str
+    valid: bool
+    feature_views: List[str]
+    entities: List[str]
+
+class HealthResponse(BaseModel):
+    status: str
+    feast_server_available: bool
+    feast_server_url: str
+    timestamp: str
+
+# =============================================================================
+# FEAST INTEGRATION
+# =============================================================================
+
+def call_feast_server(endpoint: str, data: Dict[str, Any]) -> Dict[str, Any]:
+    """Make HTTP call to FEAST server"""
+    try:
+        response = requests.post(
+            f"{FEAST_SERVER_URL}/{endpoint}",
+            json=data,
+            headers={"Content-Type": "application/json"},
+            timeout=30
+        )
+        
+        if response.status_code != 200:
+            raise HTTPException(
+                status_code=502,
+                detail=f"FEAST server error: {response.status_code} - {response.text}"
+            )
+        
+        return response.json()
+        
+    except requests.exceptions.RequestException as e:
+        logger.error(f"FEAST server connection error: {e}")
+        raise HTTPException(
+            status_code=502,
+            detail=f"Cannot connect to FEAST server: {str(e)}"
+        )
+
+# =============================================================================
+# API ENDPOINTS
+# =============================================================================
+
+@app.get("/")
+def root():
+    """API information"""
+    return {
+        "service": "FEAST FastAPI Service",
+        "version": "1.0.0",
+        "feast_server_url": FEAST_SERVER_URL,
+        "endpoints": {
+            "health": "/health",
+            "projects": "/projects",
+            "get_features": "/get-online-features",
+            "write_data": "/write-to-online-store",
+            "materialize": "/materialize",
+            "docs": "/docs"
+        }
+    }
+
+@app.get("/health", response_model=HealthResponse)
+def health_check():
+    """Health check for the FEAST FastAPI service"""
+    
+    # Check FEAST server status
+    feast_status = False
+    try:
+        response = requests.get(f"{FEAST_SERVER_URL}/health", timeout=5)
+        feast_status = response.status_code == 200
+    except:
+        pass
+    
+    overall_status = feast_status
+    
+    return HealthResponse(
+        status="healthy" if overall_status else "unhealthy",
+        feast_server_available=feast_status,
+        feast_server_url=FEAST_SERVER_URL,
+        timestamp=datetime.now().isoformat()
+    )
+
+@app.get("/projects")
+def list_projects():
+    """List all available FEAST projects"""
+    try:
+        # Call FEAST server to get projects
+        response = requests.get(f"{FEAST_SERVER_URL}/projects", timeout=10)
+        
+        if response.status_code == 200:
+            data = response.json()
+            return {
+                "projects": data.get("projects", []),
+                "total_projects": data.get("total_projects", 0),
+                "timestamp": datetime.now().isoformat()
+            }
+        else:
+            raise HTTPException(
+                status_code=502,
+                detail=f"FEAST server error: {response.status_code}"
+            )
+            
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Error listing projects: {e}")
+        raise HTTPException(
+            status_code=502,
+            detail=f"Cannot connect to FEAST server: {str(e)}"
+        )
+
+@app.get("/projects/{project_name}")
+def get_project_info(project_name: str):
+    """Get detailed information about a specific project"""
+    try:
+        response = requests.get(f"{FEAST_SERVER_URL}/projects/{project_name}", timeout=10)
+        
+        if response.status_code == 200:
+            return response.json()
+        elif response.status_code == 404:
+            raise HTTPException(status_code=404, detail=f"Project '{project_name}' not found")
+        else:
+            raise HTTPException(
+                status_code=502,
+                detail=f"FEAST server error: {response.status_code}"
+            )
+            
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Error getting project info: {e}")
+        raise HTTPException(
+            status_code=502,
+            detail=f"Cannot connect to FEAST server: {str(e)}"
+        )
+
+@app.post("/get-online-features")
+def get_online_features(request: FeatureRequest):
+    """Get online features from FEAST and return Feast JSON unmodified"""
+    logger.info(f"Getting features for project: {request.project}")
+    try:
+        feast_response = call_feast_server("get-online-features", request.dict())
+        return feast_response
+    except Exception as e:
+        logger.error(f"Error getting features: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to get features: {str(e)}")
+
+@app.post("/write-to-online-store")
+def write_to_online_store(
+    project: str,
+    feature_view_name: str,
+    df: Dict[str, Any],
+    allow_registry_cache: bool = True,
+    transform_on_write: bool = True
+):
+    """Write data to FEAST online store"""
+    
+    logger.info(f"Writing data to project: {project}, feature_view: {feature_view_name}")
+    
+    try:
+        data = {
+            "project": project,
+            "feature_view_name": feature_view_name,
+            "df": df,
+            "allow_registry_cache": allow_registry_cache,
+            "transform_on_write": transform_on_write
+        }
+        
+        feast_response = call_feast_server("write-to-online-store", data)
+        
+        return {
+            "status": "success",
+            "message": f"Data written to {project}:{feature_view_name}",
+            "timestamp": datetime.now().isoformat()
+        }
+        
+    except Exception as e:
+        logger.error(f"Error writing data: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to write data: {str(e)}"
+        )
+
+@app.post("/materialize")
+def materialize_features(
+    project: str,
+    start_ts: str,
+    end_ts: str,
+    feature_views: Optional[List[str]] = None
+):
+    """Materialize features for a project"""
+    
+    logger.info(f"Materializing features for project: {project}")
+    
+    try:
+        data = {
+            "project": project,
+            "start_ts": start_ts,
+            "end_ts": end_ts,
+            "feature_views": feature_views or []
+        }
+        
+        feast_response = call_feast_server("materialize", data)
+        
+        return {
+            "status": "success",
+            "message": f"Features materialized for {project}",
+            "timestamp": datetime.now().isoformat()
+        }
+        
+    except Exception as e:
+        logger.error(f"Error materializing features: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to materialize features: {str(e)}"
+        )
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=FEAST_FASTAPI_PORT)
+FEAST_FASTAPI_MAIN_EOF
+
+    # Create FEAST FastAPI entrypoint script
+    cat > /home/$CURRENT_USER/deployml/docker/feast-fastapi/entrypoint.sh << 'FEAST_FASTAPI_ENTRYPOINT_EOF'
+#!/bin/bash
+set -e
+
+echo "🍽️ Starting FEAST FastAPI service..."
+
+# Wait for FEAST server to be ready
+echo "⏳ Waiting for FEAST server to be ready..."
+until curl -f $FEAST_SERVER_URL/health 2>/dev/null; do
+    echo "FEAST server not ready yet, waiting..."
+    sleep 5
+done
+
+echo "✅ FEAST server is ready!"
+
+# Start FEAST FastAPI service
+echo "🚀 Starting FEAST FastAPI on port 8000..."
+exec uvicorn main:app --host 0.0.0.0 --port 8000
+FEAST_FASTAPI_ENTRYPOINT_EOF
+
+    # Create FEAST FastAPI environment configuration
+    cat > /home/$CURRENT_USER/deployml/docker/feast_fastapi_environment.env << 'FEAST_FASTAPI_ENV_EOF'
+# FEAST FastAPI Environment Configuration
+FEAST_SERVER_URL=http://feast:6566
+FEAST_FASTAPI_PORT=8000
+
+## Minimal required vars only; avoid non-interpolated Terraform expressions
+## FEAST FastAPI only needs to reach internal FEAST via Docker DNS
+FEAST_FASTAPI_ENV_EOF
+
+    # Set proper permissions
+    chmod +x /home/$CURRENT_USER/deployml/docker/feast-fastapi/entrypoint.sh
 
 
 {% endif %}
@@ -2295,6 +2703,23 @@ ENV_EOF
     else
         echo "⚠️ FEAST deployment validation had issues - check logs for details"
     fi
+
+    # Test FEAST FastAPI container
+    echo "Testing FEAST FastAPI container..."
+    for i in {1..20}; do
+      if curl -f http://localhost:9000/health 2>/dev/null; then
+        echo "✅ FEAST FastAPI container is running successfully!"
+        break
+      else
+        echo "Attempt $i: FEAST FastAPI container not responding yet..."
+        if [ $i -eq 20 ]; then
+          echo "⚠️  FEAST FastAPI container may still be starting up..."
+          echo "Checking FEAST FastAPI container logs..."
+          sudo -u $CURRENT_USER docker logs feast-fastapi-server
+        fi
+        sleep 15
+      fi
+    done
     {% endif %}
     
     {% if flags.needs_airflow %}
@@ -2363,7 +2788,11 @@ ENV_EOF
     echo "🍽️ FEAST Feature Server (gRPC/REST API) will be available at: http://$EXTERNAL_IP:{{ flags.feast_params.get('feast_port', 6566) }}"
     echo "🔍 FEAST Health Check: http://$EXTERNAL_IP:{{ flags.feast_params.get('feast_port', 6566) }}/health"
     echo "📡 FEAST gRPC Endpoint: $EXTERNAL_IP:{{ flags.feast_params.get('feast_port', 6566) }}"
+    echo "🌐 FEAST FastAPI Service will be available at: http://$EXTERNAL_IP:9000"
+    echo "🔍 FEAST FastAPI Health Check: http://$EXTERNAL_IP:9000/health"
+    echo "📚 FEAST FastAPI Docs: http://$EXTERNAL_IP:9000/docs"
     echo "💡 Note: FEAST is a feature store API server, not a web UI. Use gRPC or REST clients to interact with it."
+    echo "💡 FEAST FastAPI provides HTTP API wrapper for easier integration with external services."
     {% endif %}
     {% if flags.needs_airflow %}
     echo "🪂 Airflow Web UI will be available at: http://$EXTERNAL_IP:{{ flags.airflow_params.get('airflow_port', 8080) }}"
@@ -2450,6 +2879,23 @@ resource "google_compute_firewall" "allow_feast" {
   allow {
     protocol = "tcp"
     ports    = ["{{ flags.feast_params.get('feast_port', 6566) }}"]
+  }
+  source_ranges = ["0.0.0.0/0"]
+  target_tags   = ["mlflow-server"]
+}
+{% endif %}
+
+{% if flags.needs_feast %}
+# Firewall rule to allow Feast FastAPI traffic (port 9000)
+resource "google_compute_firewall" "allow_feast_fastapi" {
+  name    = "allow-feast-fastapi-9000"
+  network = "default"
+
+  depends_on = [null_resource.api_readiness_check]
+
+  allow {
+    protocol = "tcp"
+    ports    = ["9000"]
   }
   source_ranges = ["0.0.0.0/0"]
   target_tags   = ["mlflow-server"]
@@ -2575,6 +3021,21 @@ output "feast_ui_url" {
   description = "FEAST health check endpoint (FEAST doesn't have a web UI, it's a gRPC/REST API server)"
 }
 
+output "feast_fastapi_url" {
+  value = "http://${google_compute_instance.mlflow_vm.network_interface[0].access_config[0].nat_ip}:9000"
+  description = "FEAST FastAPI service base URL"
+}
+
+output "feast_fastapi_health" {
+  value = "http://${google_compute_instance.mlflow_vm.network_interface[0].access_config[0].nat_ip}:9000/health"
+  description = "FEAST FastAPI health endpoint"
+}
+
+output "feast_fastapi_docs" {
+  value = "http://${google_compute_instance.mlflow_vm.network_interface[0].access_config[0].nat_ip}:9000/docs"
+  description = "FEAST FastAPI Swagger docs"
+}
+
 output "feast_deployment_info" {
   value = {
     container_name = "feast-server"
@@ -2655,7 +3116,8 @@ output "docker_commands" {
     check_containers = "docker ps"
     mlflow_logs      = "docker logs mlflow-server"
     fastapi_logs     = "docker logs fastapi-proxy"{% if flags.needs_feast %}
-    feast_logs       = "docker logs feast-server"{% endif %}{% if flags.needs_grafana %}
+    feast_logs       = "docker logs feast-server"
+    feast_fastapi_logs = "docker logs feast-fastapi-server"{% endif %}{% if flags.needs_grafana %}
     grafana_logs     = "docker logs grafana-server"{% endif %}{% if flags.needs_airflow %}
     airflow_webserver_logs = "docker logs airflow-webserver"
     airflow_scheduler_logs = "docker logs airflow-scheduler"
