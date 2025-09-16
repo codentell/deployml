@@ -1,26 +1,30 @@
+
 [project]
-name = "deployml"
+name = "deployml-core"
 version = "0.0.1"
 description = "Infra for academia"
 authors = [
-    {name = "Your Name",email = "you@example.com"}
+    {name = "Drew Hoang", email = "codentell@gmail.com"},
+    {name = "Jarvin Bayona", email = "jarvin.bayona@gmail.com"},
+    {name = "Grant Nitta", email = "gtnitta@gmail.com"},
+    {name = "Robert Clements", email = "rclements@usfca.edu"}
 ]
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-"typer",
-"pyyaml",
-"jinja2",
-"rich",
-"google-cloud-storage (>=3.1.1,<4.0.0)"
+    "typer",
+    "pyyaml", 
+    "jinja2",
+    "rich",
+    "google-cloud-storage>=3.1.1,<4.0.0"
 ]
-
-[tool.setuptools]
-package-dir = {"" = "src"}
-packages = ["deployml"]
 
 [project.scripts]
 deployml = "deployml.cli.cli:main"
+
+[tool.poetry]
+packages = [{include = "deployml", from = "src"}]
+
 
 
 [build-system]
