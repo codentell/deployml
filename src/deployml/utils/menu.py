@@ -35,7 +35,7 @@ def show_menu(title: str, enum_class, default_value=None) -> str:
                 typer.secho(f"✅ Selected: {selected}", fg=typer.colors.GREEN)
                 return selected
             else:
-                typer.secho(f"❌ Please enter a number between 1 and {len(options)}", fg=typer.colors.RED)
+                typer.secho(f"Please enter a number between 1 and {len(options)}", fg=typer.colors.RED)
         except ValueError:
-            typer.secho("❌ Please enter a valid number", fg=typer.colors.RED)
+            typer.secho("Please enter a valid number", fg=typer.colors.RED)
 
