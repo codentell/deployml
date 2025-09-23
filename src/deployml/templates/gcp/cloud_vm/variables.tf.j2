@@ -200,7 +200,7 @@ variable "offline_store_type" {
 variable "bigquery_dataset" {
   description = "BigQuery dataset for Feast offline store"
   type        = string
-  default     = "feast_offline_store"
+  default     = "{{ ('feast_offline_store_' ~ stack_name ~ '_' ~ project_id ~ '_' ~ name_hash) | replace('-', '_') }}"
 }
 
 variable "create_bigquery_dataset" {
