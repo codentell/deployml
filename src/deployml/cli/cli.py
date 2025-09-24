@@ -20,6 +20,7 @@ from typing import Optional
 import random
 import string
 from google.cloud import storage
+import hashlib
 
 # Import refactored utility functions
 from deployml.utils.helpers import (
@@ -475,6 +476,10 @@ def deploy(
         f"{cloud}/{deployment_type}/terraform.tfvars.j2"
     )
 
+    # Compute a stable short hash for resource names to avoid collisions
+    name_material = f"{workspace_name}:{project_id}".encode("utf-8")
+    name_hash = hashlib.sha1(name_material).hexdigest()[:6]
+
     # Render templates
     if deployment_type == "cloud_vm":
         main_tf = main_template.render(
@@ -486,6 +491,8 @@ def deploy(
             project_id=project_id,
             region=region,
             zone=config["provider"].get("zone", f"{region}-a"),
+            stack_name=workspace_name,
+            name_hash=name_hash,
         )
     else:
         main_tf = main_template.render(
@@ -495,9 +502,15 @@ def deploy(
             create_artifact_bucket=create_artifact_bucket,
             bucket_configs=bucket_configs,  # ← Pass structured bucket configs
             project_id=project_id,
+            stack_name=workspace_name,
+            name_hash=name_hash,
         )
     variables_tf = var_template.render(
-        stack=stack, cloud=cloud, project_id=project_id
+        stack=stack,
+        cloud=cloud,
+        project_id=project_id,
+        stack_name=workspace_name,
+        name_hash=name_hash,
     )
     tfvars_content = tfvars_template.render(
         project_id=project_id,
@@ -506,6 +519,8 @@ def deploy(
         stack=stack,
         cloud=cloud,
         create_artifact_bucket=create_artifact_bucket,
+        stack_name=workspace_name,
+        name_hash=name_hash,
     )
 
     # Write files
