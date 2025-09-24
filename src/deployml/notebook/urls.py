@@ -10,6 +10,7 @@ class ServiceURLs:
         self.serving: Optional[str] = None
         self.grafana: Optional[str] = None
         self.postgresql: Optional[str] = None
+        self.airflow: Optional[str] = None
         self.cron_jobs: Dict[str, str] = {}  # job_name -> job_url
     
     def to_dict(self) -> Dict[str, str]:
@@ -19,7 +20,8 @@ class ServiceURLs:
             'feast': self.feast, 
             'serving': self.serving,
             'grafana': self.grafana,
-            'postgresql': self.postgresql
+            'postgresql': self.postgresql,
+            'airflow': self.airflow
         }
         # Add cron jobs with prefixed keys
         for job_name, job_url in self.cron_jobs.items():
@@ -34,7 +36,8 @@ class ServiceURLs:
             'feast': 'Feast Feature Store', 
             'serving': 'Model Serving API',
             'grafana': 'Grafana Monitoring Dashboard',
-            'postgresql': 'PostgreSQL Database'
+            'postgresql': 'PostgreSQL Database',
+            'airflow': 'Airflow Workflow Orchestration'
         }
         
         # Add cron job service names

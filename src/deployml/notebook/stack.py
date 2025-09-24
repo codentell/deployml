@@ -1,10 +1,17 @@
 import json
 import subprocess
 from pathlib import Path
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 import pandas as pd
-import mlflow
-from mlflow.tracking import MlflowClient
+
+try:
+    import mlflow
+    from mlflow.tracking import MlflowClient
+    HAS_MLFLOW = True
+except ImportError:
+    mlflow = None
+    MlflowClient = None
+    HAS_MLFLOW = False
 
 from .urls import ServiceURLs
 from .display import display_services_table
@@ -49,17 +56,47 @@ class DeploymentStack:
             # Extract URLs from Terraform outputs
             for key, value in outputs.items():
                 output_val = value.get('value', '')
-                if 'mlflow' in key.lower() and output_val.startswith('http'):
-                    urls.mlflow = output_val
-                elif 'feast' in key.lower() and output_val.startswith('http'):
-                    urls.feast = output_val
-                elif 'fastapi' in key.lower() or 'serving' in key.lower() and output_val.startswith('http'):
-                    urls.serving = output_val
-                elif 'grafana' in key.lower() and output_val.startswith('http'):
-                    urls.grafana = output_val
+                
+                # Handle both string URLs and dictionary structures
+                if isinstance(output_val, str):
+                    # Cloud Run deployment style (string URLs)
+                    if 'mlflow' in key.lower() and output_val.startswith('http'):
+                        urls.mlflow = output_val
+                    elif 'feast' in key.lower() and output_val.startswith('http'):
+                        urls.feast = output_val  
+                    elif ('fastapi' in key.lower() or 'serving' in key.lower()) and output_val.startswith('http'):
+                        urls.serving = output_val
+                    elif 'grafana' in key.lower() and output_val.startswith('http'):
+                        urls.grafana = output_val
+                elif isinstance(output_val, dict):
+                    # Cloud VM deployment style (dictionary with service info)
+                    # Handle VM deployment outputs that contain URLs in dictionaries
+                    self._extract_vm_urls_from_dict(key, output_val, urls)
+                
+                # Handle specific cloud VM output keys - use flexible pattern matching
+                key_lower = key.lower()
+                if isinstance(output_val, str) and output_val.startswith('http'):
+                    if 'mlflow_url' in key_lower:
+                        urls.mlflow = output_val
+                    elif 'feast_url' in key_lower and 'fastapi' not in key_lower:
+                        urls.feast = output_val
+                    elif 'fastapi_url' in key_lower or 'serving' in key_lower:
+                        urls.serving = output_val
+                    elif 'grafana_url' in key_lower:
+                        urls.grafana = output_val
+                    elif 'airflow_url' in key_lower:
+                        urls.airflow = output_val
+                    elif 'feast_fastapi_url' in key_lower:
+                        # Use feast_fastapi_url if feast_url is not available
+                        if not urls.feast:
+                            urls.feast = output_val
+                elif 'feast_grpc_url' in key_lower and isinstance(output_val, str):
+                    # GRPC URL format for Feast
+                    if not urls.feast and output_val and not output_val.startswith('['):
+                        urls.feast = f"grpc://{output_val}"
                 elif 'instance_connection_name' in key.lower():
                     # Format PostgreSQL connection info for display
-                    if output_val and ':' in output_val:
+                    if output_val and isinstance(output_val, str) and ':' in output_val:
                         # Parse the instance connection name: project:region:instance
                         parts = output_val.split(':')
                         if len(parts) == 3:
@@ -82,6 +119,17 @@ class DeploymentStack:
         except Exception as e:
             print(f"Warning: Could not extract URLs: {e}")
             return ServiceURLs()
+    
+    def _extract_vm_urls_from_dict(self, key: str, output_dict: Dict[str, Any], urls: ServiceURLs):
+        """Extract URLs from dictionary-style VM deployment outputs"""
+        # Handle airflow deployment info
+        if 'airflow_deployment_info' in key.lower() and isinstance(output_dict, dict):
+            # Airflow URLs are handled elsewhere in the outputs
+            pass
+        elif 'feast_deployment_info' in key.lower() and isinstance(output_dict, dict):
+            # Feast URLs are handled elsewhere in the outputs  
+            pass
+        # Add more VM-specific dictionary parsing as needed
     
     @property  
     def mlflow(self) -> MlflowClient:
@@ -386,3 +434,155 @@ class DeploymentStack:
             print(f"{label:20}: {value}")
         
         print("="*80)
+    
+    def show_deployment_outputs(self):
+        """Show detailed deployment outputs for both cloud_vm and cloud_run"""
+        try:
+            terraform_dir = self.workspace_dir / "terraform"
+            result = subprocess.run(
+                ["terraform", "output", "-json"],
+                cwd=terraform_dir,
+                capture_output=True,
+                text=True,
+                check=True
+            )
+            
+            outputs = json.loads(result.stdout)
+            
+            print("\n" + "="*60)
+            print("🎯 DEPLOYMENT OUTPUTS")
+            print("="*60)
+            
+            # Determine deployment type
+            deployment_type = self._detect_deployment_type(outputs)
+            
+            if deployment_type == "cloud_vm":
+                self._show_cloud_vm_outputs(outputs)
+            elif deployment_type == "cloud_run":
+                self._show_cloud_run_outputs(outputs)
+            else:
+                self._show_generic_outputs(outputs)
+                
+        except Exception as e:
+            print(f"Error retrieving deployment outputs: {e}")
+    
+    def _detect_deployment_type(self, outputs: Dict[str, Any]) -> str:
+        """Detect whether this is a cloud_vm or cloud_run deployment"""
+        vm_indicators = ['vm_external_ip', 'ssh_command', 'docker_commands']
+        cloud_run_indicators = ['cloud_run_url', 'service_url']
+        
+        vm_score = sum(1 for indicator in vm_indicators if any(indicator in key.lower() for key in outputs.keys()))
+        cloud_run_score = sum(1 for indicator in cloud_run_indicators if any(indicator in key.lower() for key in outputs.keys()))
+        
+        if vm_score > cloud_run_score:
+            return "cloud_vm"
+        elif cloud_run_score > vm_score:
+            return "cloud_run"
+        else:
+            return "generic"
+    
+    def _show_cloud_vm_outputs(self, outputs: Dict[str, Any]):
+        """Display cloud_vm specific deployment outputs"""
+        print("Cloud VM Deployment Details")
+        print("-" * 40)
+        
+        # VM Connection Info
+        vm_ip = None
+        ssh_command = None
+        
+        for key, value in outputs.items():
+            output_val = value.get('value', '')
+            if 'vm_external_ip' in key.lower():
+                vm_ip = output_val
+            elif 'ssh_command' in key.lower():
+                ssh_command = output_val
+                
+        if vm_ip:
+            print(f"🖥️  VM External IP: {vm_ip}")
+        if ssh_command:
+            print(f"🔌 SSH Command: {ssh_command}")
+            
+        # Service URLs
+        print(f"\n🌐 Service URLs:")
+        services = ['mlflow', 'feast', 'grafana', 'airflow', 'fastapi']
+        for service in services:
+            for key, value in outputs.items():
+                if f"{service}_url" in key.lower():
+                    url = value.get('value', '')
+                    if url and url.startswith('http'):
+                        print(f"   {service.title()}: {url}")
+                        
+        # Docker Commands
+        docker_commands = None
+        for key, value in outputs.items():
+            if 'docker_commands' in key.lower():
+                docker_commands = value.get('value', {})
+                break
+                
+        if docker_commands and isinstance(docker_commands, dict):
+            print(f"\n🐳 Docker Management:")
+            important_commands = ['check_containers', 'start_services', 'stop_services', 'restart_services']
+            for cmd_key in important_commands:
+                if cmd_key in docker_commands:
+                    print(f"   {cmd_key.replace('_', ' ').title()}: {docker_commands[cmd_key]}")
+    
+    def _show_cloud_run_outputs(self, outputs: Dict[str, Any]):
+        """Display cloud_run specific deployment outputs"""
+        print("☁️ Cloud Run Deployment Details")
+        print("-" * 40)
+        
+        # Service URLs
+        print(f"🌐 Service URLs:")
+        for key, value in outputs.items():
+            output_val = value.get('value', '')
+            if isinstance(output_val, str) and output_val.startswith('http'):
+                service_name = key.replace('_url', '').replace('_', ' ').title()
+                print(f"   {service_name}: {output_val}")
+                
+        # Cloud Run specific info
+        for key, value in outputs.items():
+            if 'region' in key.lower():
+                print(f"Region: {value.get('value', 'N/A')}")
+            elif 'project' in key.lower():
+                print(f"Project: {value.get('value', 'N/A')}")
+    
+    def _show_generic_outputs(self, outputs: Dict[str, Any]):
+        """Display generic deployment outputs when type cannot be determined"""
+        print("Deployment Outputs")
+        print("-" * 40)
+        
+        # Group outputs by type
+        urls = {}
+        configs = {}
+        credentials = {}
+        other = {}
+        
+        for key, value in outputs.items():
+            output_val = value.get('value', '')
+            
+            if isinstance(output_val, str) and output_val.startswith('http'):
+                urls[key] = output_val
+            elif 'password' in key.lower() or 'credential' in key.lower() or 'secret' in key.lower():
+                credentials[key] = "[SENSITIVE]" if output_val else "Not set"
+            elif isinstance(output_val, dict):
+                configs[key] = output_val
+            else:
+                other[key] = output_val
+                
+        if urls:
+            print("🌐 Service URLs:")
+            for key, url in urls.items():
+                service_name = key.replace('_url', '').replace('_', ' ').title()
+                print(f"   {service_name}: {url}")
+                
+        if other:
+            print(f"\n📋 Configuration:")
+            for key, val in other.items():
+                if not isinstance(val, dict):
+                    display_name = key.replace('_', ' ').title()
+                    print(f"   {display_name}: {val}")
+                    
+        if credentials:
+            print(f"\nCredentials: {len(credentials)} sensitive values (use specific methods to view)")
+            
+        print("="*60)
