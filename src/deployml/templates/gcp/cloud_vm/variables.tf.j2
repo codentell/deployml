@@ -234,6 +234,31 @@ variable "feast_separate_database" {
   default     = true
 }
 
+# --- Grafana Configuration ---
+variable "enable_grafana" {
+  description = "Whether to enable Grafana monitoring service"
+  type        = bool
+  default     = false
+}
+
+variable "grafana_port" {
+  description = "Port for Grafana server"
+  type        = number
+  default     = 3000
+}
+
+variable "grafana_admin_user" {
+  description = "Admin username for Grafana"
+  type        = string
+  default     = "admin"
+}
+
+variable "grafana_admin_password" {
+  description = "Admin password for Grafana"
+  type        = string
+  default     = "admin"
+}
+
 # --- Airflow Configuration ---
 variable "airflow_port" {
   description = "Port for Airflow web UI"
