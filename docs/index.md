@@ -1,12 +1,14 @@
 # deployml
 
-Welcome to deployml, a python library for deploying an end-to-end machine learning operations infrastructure in the cloud.
+Welcome to deployml, a python library for deploying an end-to-end machine learning operations (MLOps) infrastructure in the cloud.
 
 ## Why was deployml created?
 
-deployml was created to facilitate the learning of the MLOps pipeline and processes. It is not easy to get hands-on practice with MLOps, particularly on a laptop, and provisioning an entire MLOps infrastructure can be prohibitively difficult, resulting in many hours of wasted time debugging configuration issues. The goal of deployml is to make the infrastructure part just a little bit easier so that more time can be spent on actually using the infrastructure to practice with developing, deploying, and monitoring machine learning models. 
+deployml was born out of the frustrations of teaching a MLOps course. Understanding the general concepts of MLOps is easy enough through lectures and case studies, but students wanted hands-on experience, and preferably on a truly scalable infrastructure. As I went about designing labs and homework assignments to give students what they want - the opportunity to work with ML end-to-end in the cloud - I quickly noticed a problem: many students were spending hours on just "getting things to work". I wanted to create a tool that could facilitate the learning of the MLOps pipeline and processes, and with the help of some very dedicated graduate students, deployml is the tool we came up with. 
 
-There is a lot that can be learned by struggling with getting infrastructure to work - but we've noticed that when students spend what precious time they have simply "getting it to work", they have no fuel left to explore the different stages of the MLOps pipeline. We hope that this tool gives them that freedom, while at the same, can be used as a learning tool for docker, kubernetes, terraform, and cloud computing. 
+ The ultimate goal of deployml is to make the infrastructure part just a little bit easier so that more time can be spent on actually using the infrastructure to practice with developing, deploying, and monitoring machine learning models. 
+
+We recognize that there is a lot that can be learned by struggling with getting infrastructure to work - but we've noticed that when students spend what precious time they have simply getting it to work, they have no fuel left to explore the different stages of the MLOps pipeline. We hope that this tool gives them that freedom, while at the same, can be used as a learning aide for docker, kubernetes, terraform, and cloud computing. 
 
 ## Who is deployml for?
 
