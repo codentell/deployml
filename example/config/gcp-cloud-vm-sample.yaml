@@ -1,7 +1,7 @@
 name: gcp-mlops-stack-mlflow-vm
 provider:
   name: gcp
-  project_id: hatchet15
+  project_id: hatchet16
   region: us-west2
   zone: us-west2-a
 
@@ -9,6 +9,10 @@ cost_analysis:
   enabled: true              # Enable/disable cost analysis (default: true)
   warning_threshold: 50.0    # Warn if monthly cost exceeds this amount (default: 100.0)
   currency: "USD"   
+  # Optional: simple usage-based estimates (GB). If set, DeployML auto-generates an Infracost usage file
+  bucket_amount: 200        # GB stored across GCS buckets
+  cloudsql_amount: 50       # GB of Cloud SQL storage
+  bigquery_amount: 500      # GB of BigQuery table storage
 
 deployment:
   type: cloud_vm

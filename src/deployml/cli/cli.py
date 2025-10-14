@@ -574,8 +574,49 @@ def deploy(
 
     cost_analysis = None
     if cost_enabled:
+        usage_file_path = cost_config.get("usage_file")
+        usage_file = Path(usage_file_path) if usage_file_path else None
+
+        # If no explicit usage file provided, generate one from high-level YAML values
+        if usage_file is None:
+            try:
+                bucket_amount = cost_config.get("bucket_amount")
+                cloudsql_amount = cost_config.get(
+                    "cloudSQL_amount"
+                ) or cost_config.get("cloudsql_amount")
+                bigquery_amount = cost_config.get(
+                    "bigQuery_amount"
+                ) or cost_config.get("bigquery_amount")
+
+                resource_type_default_usage = {}
+                # Map high-level amounts to Infracost resource defaults
+                if bucket_amount is not None:
+                    resource_type_default_usage["google_storage_bucket"] = {
+                        "storage_gb": float(bucket_amount)
+                    }
+                if cloudsql_amount is not None:
+                    resource_type_default_usage[
+                        "google_sql_database_instance"
+                    ] = {"storage_gb": float(cloudsql_amount)}
+                if bigquery_amount is not None:
+                    resource_type_default_usage["google_bigquery_table"] = {
+                        "storage_gb": float(bigquery_amount)
+                    }
+
+                if resource_type_default_usage:
+                    usage_yaml = {
+                        "version": "0.1",
+                        "resource_type_default_usage": resource_type_default_usage,
+                    }
+                    usage_file = DEPLOYML_TERRAFORM_DIR / "infracost-usage.yml"
+                    with open(usage_file, "w") as f:
+                        yaml.safe_dump(usage_yaml, f, sort_keys=False)
+            except Exception:
+                # If usage-file generation fails, continue without it
+                usage_file = None
+
         cost_analysis = run_infracost_analysis(
-            DEPLOYML_TERRAFORM_DIR, warning_threshold
+            DEPLOYML_TERRAFORM_DIR, warning_threshold, usage_file=usage_file
         )
 
     # Format confirmation message with cost information

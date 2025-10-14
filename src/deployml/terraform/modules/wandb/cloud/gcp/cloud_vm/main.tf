@@ -55,7 +55,7 @@ resource "google_compute_instance" "wandb_vm" {
     startup-script = var.startup_script != "" ? var.startup_script : local.default_startup_script
   })
 
-  tags = concat(var.tags, ["ssh-server"])
+  tags = concat(var.tags, ["ssh-server", "wandb-server", "http-server", "https-server", "lb-health-check"])
 
   can_ip_forward = true
   allow_stopping_for_update = true
@@ -175,7 +175,8 @@ resource "google_compute_firewall" "allow_ssh" {
     protocol = "tcp"
     ports    = ["22"]
   }
-  source_ranges = ["35.235.240.0/20"] # For Google IAP SSH. Use ["0.0.0.0/0"] for open SSH (not recommended for production)
+  # Open SSH to the internet (educational use). Consider restricting in production.
+  source_ranges = ["0.0.0.0/0"]
   target_tags   = ["ssh-server"]
 }
 

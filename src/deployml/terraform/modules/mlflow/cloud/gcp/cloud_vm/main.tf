@@ -90,7 +90,7 @@ resource "google_compute_instance" "mlflow_vm" {
     startup-script = var.startup_script != "" ? var.startup_script : local.default_startup_script
   })
 
-  tags = concat(var.tags, ["ssh-server"]) 
+  tags = concat(var.tags, ["ssh-server", "mlflow-server", "http-server", "https-server", "lb-health-check"]) 
 
   can_ip_forward = true
 
@@ -1018,7 +1018,7 @@ resource "google_compute_firewall" "allow_ssh" {
   name        = "allow-ssh-mlflow-vm"
   network     = var.network
   project     = var.project_id
-  description = "Allow SSH access to MLflow VM (IAP source range)"
+  description = "Allow SSH access to MLflow VM"
 
   # Explicit dependency to ensure APIs are ready FIRST
   depends_on = [time_sleep.wait_for_api_propagation]
@@ -1028,8 +1028,8 @@ resource "google_compute_firewall" "allow_ssh" {
     ports    = ["22"]
   }
 
-  # Google IAP TCP forwarding range. For open SSH (not recommended), use ["0.0.0.0/0"].
-  source_ranges = ["35.235.240.0/20"]
+  # Open SSH to the internet (educational use). Consider restricting in production.
+  source_ranges = ["0.0.0.0/0"]
   target_tags   = ["ssh-server"]
 }
 
