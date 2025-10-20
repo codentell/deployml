@@ -478,11 +478,11 @@ resource "google_compute_instance" "mlflow_vm" {
 locals {
   {% if flags.needs_postgres %}
   # Use PostgreSQL connection string from the direct resources
-      postgres_connection_string = "postgresql+psycopg2://${google_sql_user.users.name}:${random_password.db_password.result}@${google_sql_database_instance.postgres.public_ip_address}:5432/${google_sql_database.db.name}"
-    backend_store_uri = "postgresql+psycopg2://${google_sql_user.users.name}:${random_password.db_password.result}@${google_sql_database_instance.postgres.public_ip_address}:5432/${google_sql_database.db.name}"
+      postgres_connection_string = "postgresql+psycopg2://${google_sql_user.users.name}:${urlencode(random_password.db_password.result)}@${google_sql_database_instance.postgres.public_ip_address}:5432/${google_sql_database.db.name}"
+    backend_store_uri = "postgresql+psycopg2://${google_sql_user.users.name}:${urlencode(random_password.db_password.result)}@${google_sql_database_instance.postgres.public_ip_address}:5432/${google_sql_database.db.name}"
   {% if flags.needs_feast %}
   # FEAST PostgreSQL configuration - use separate database and user
-      feast_registry_uri = "postgresql+psycopg2://${google_sql_user.feast_user.name}:${random_password.db_password.result}@${google_sql_database_instance.postgres.public_ip_address}:5432/${google_sql_database.feast_db.name}"
+      feast_registry_uri = "postgresql+psycopg2://${google_sql_user.feast_user.name}:${urlencode(random_password.db_password.result)}@${google_sql_database_instance.postgres.public_ip_address}:5432/${google_sql_database.feast_db.name}"
     feast_postgres_host = google_sql_database_instance.postgres.public_ip_address
   feast_postgres_port = "5432"
   feast_postgres_database = google_sql_database.feast_db.name
@@ -490,7 +490,7 @@ locals {
   feast_postgres_password = random_password.db_password.result
   {% else %}
   # FEAST PostgreSQL configuration - use same database as MLflow
-  feast_registry_uri = "postgresql+psycopg2://${google_sql_user.users.name}:${random_password.db_password.result}@${google_sql_database_instance.postgres.public_ip_address}:5432/${google_sql_database.db.name}"
+  feast_registry_uri = "postgresql+psycopg2://${google_sql_user.users.name}:${urlencode(random_password.db_password.result)}@${google_sql_database_instance.postgres.public_ip_address}:5432/${google_sql_database.db.name}"
   feast_postgres_host = google_sql_database_instance.postgres.public_ip_address
   feast_postgres_port = "5432"
   feast_postgres_database = google_sql_database.db.name
@@ -500,7 +500,7 @@ locals {
 
   {% if flags.needs_airflow %}
   # Airflow PostgreSQL configuration - use separate database and user
-      airflow_sql_alchemy_conn = "postgresql+psycopg2://${google_sql_user.airflow_user.name}:${random_password.db_password.result}@${google_sql_database_instance.postgres.public_ip_address}:5432/${google_sql_database.airflow_db.name}"
+      airflow_sql_alchemy_conn = "postgresql+psycopg2://${google_sql_user.airflow_user.name}:${urlencode(random_password.db_password.result)}@${google_sql_database_instance.postgres.public_ip_address}:5432/${google_sql_database.airflow_db.name}"
     airflow_postgres_host = google_sql_database_instance.postgres.public_ip_address
   airflow_postgres_port = "5432"
   airflow_postgres_database = google_sql_database.airflow_db.name
@@ -712,7 +712,7 @@ locals {
     echo "Setting up Feast environment configuration..."
     cat > /home/$CURRENT_USER/deployml/docker/feast_environment.env << 'FEAST_ENV_EOF'
 FEAST_REGISTRY_TYPE={{ 'sql' if flags.use_cloudsql or flags.use_local_postgres else 'file' }}
-FEAST_REGISTRY_PATH={% if flags.use_cloudsql %}postgresql+psycopg2://{{ flags.first_tool_name }}:{{ '${random_password.db_password.result}' }}@{{ '${google_sql_database_instance.postgres.public_ip_address}' }}:5432/{{ '${google_sql_database.db.name}' }}{% elif flags.use_local_postgres %}postgresql+psycopg2://{{ flags.first_tool_name }}:{{ '${random_password.db_password.result}' }}@localhost:5432/{{ flags.first_tool_name }}{% else %}data/registry.db{% endif %}
+FEAST_REGISTRY_PATH={% if flags.use_cloudsql %}postgresql+psycopg2://{{ flags.first_tool_name }}:{{ '${urlencode(random_password.db_password.result)}' }}@{{ '${google_sql_database_instance.postgres.public_ip_address}' }}:5432/{{ '${google_sql_database.db.name}' }}{% elif flags.use_local_postgres %}postgresql+psycopg2://{{ flags.first_tool_name }}:{{ '${urlencode(random_password.db_password.result)}' }}@localhost:5432/{{ flags.first_tool_name }}{% else %}data/registry.db{% endif %}
 FEAST_ONLINE_STORE_TYPE={{ 'postgres' if flags.use_cloudsql or flags.use_local_postgres else 'sqlite' }}
 {% if flags.use_cloudsql %}
 FEAST_ONLINE_STORE_HOST={{ '${google_sql_database_instance.postgres.public_ip_address}' }}
@@ -729,7 +729,7 @@ FEAST_ONLINE_STORE_PASSWORD={{ '${random_password.db_password.result}' }}
 {% endif %}
 FEAST_OFFLINE_STORE_TYPE=bigquery
 FEAST_OFFLINE_STORE_PROJECT={{ project_id }}
-FEAST_OFFLINE_STORE_DATASET={{ flags.feast_params.get('bigquery_dataset', 'feast_offline_store') }}
+FEAST_OFFLINE_STORE_DATASET={{ flags.feast_params.get('bigquery_dataset', 'feast_offline_store_' ~ stack_name ~ '_' ~ project_id ~ '_' ~ name_hash) }}
 FEAST_ARTIFACT_BUCKET={% if bucket_configs %}{% for config in bucket_configs %}{% if config.create %}{{ config.bucket_name }}{% endif %}{% endfor %}{% else %}{% endif %}
 GOOGLE_CLOUD_PROJECT={{ project_id }}
 USE_POSTGRES={{ 'true' if flags.use_cloudsql or flags.use_local_postgres else 'false' }}
@@ -754,7 +754,7 @@ FEAST_ENV_EOF
     cat > /home/$CURRENT_USER/deployml/docker/airflow_environment.env << 'AIRFLOW_ENV_EOF'
 AIRFLOW__CORE__EXECUTOR={{ flags.airflow_params.get('airflow_executor', 'LocalExecutor') }}
 {% if flags.use_cloudsql %}
-AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=postgresql+psycopg2://{{ '${google_sql_user.airflow_user.name}' }}:{{ '${random_password.db_password.result}' }}@{{ '${google_sql_database_instance.postgres.public_ip_address}' }}:5432/{{ '${google_sql_database.airflow_db.name}' }}
+AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=postgresql+psycopg2://{{ '${google_sql_user.airflow_user.name}' }}:{{ '${urlencode(random_password.db_password.result)}' }}@{{ '${google_sql_database_instance.postgres.public_ip_address}' }}:5432/{{ '${google_sql_database.airflow_db.name}' }}
 {% elif flags.use_local_postgres %}
 AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=postgresql+psycopg2://airflow:{{ '${random_password.db_password.result}' }}@localhost:5432/airflow
 {% else %}
@@ -843,7 +843,7 @@ services:
     ports:
       - "{{ flags.mlflow_params.mlflow_port }}:5000"
     environment:
-      - MLFLOW_BACKEND_STORE_URI={% if flags.needs_postgres %}postgresql+psycopg2://{{ flags.first_tool_name }}:{{ '${random_password.db_password.result}' }}@{{ '${google_sql_database_instance.postgres.public_ip_address}' }}:5432/{{ '${google_sql_database.db.name}' }}{% else %}sqlite:///mlflow.db{% endif %}
+      - MLFLOW_BACKEND_STORE_URI={% if flags.needs_postgres %}postgresql+psycopg2://{{ flags.first_tool_name }}:{{ '${urlencode(random_password.db_password.result)}' }}@{{ '${google_sql_database_instance.postgres.public_ip_address}' }}:5432/{{ '${google_sql_database.db.name}' }}{% else %}sqlite:///mlflow.db{% endif %}
       - MLFLOW_DEFAULT_ARTIFACT_ROOT={% if bucket_configs %}{% for config in bucket_configs %}{% if config.create %}gs://{{ config.bucket_name }}{% endif %}{% endfor %}{% else %}./mlflow-artifacts{% endif %}
       - MLFLOW_SERVER_HOST=0.0.0.0
       - MLFLOW_SERVER_PORT=5000
@@ -855,7 +855,7 @@ services:
     restart: unless-stopped
     # Wait for PostgreSQL to be ready before starting MLflow (when using PostgreSQL)
     entrypoint: ["/bin/bash"]
-    command: ["-c", "{% if flags.needs_postgres %}echo 'Waiting for PostgreSQL to be ready...' && until pg_isready -h {{ '${google_sql_database_instance.postgres.public_ip_address}' }} -p 5432 -U {{ flags.first_tool_name }}; do echo 'PostgreSQL not ready yet, waiting...' && sleep 5; done && echo 'PostgreSQL is ready! Starting MLflow...' && {% endif %}mlflow server --host 0.0.0.0 --port 5000 --backend-store-uri {% if flags.needs_postgres %}postgresql+psycopg2://{{ flags.first_tool_name }}:{{ '${random_password.db_password.result}' }}@{{ '${google_sql_database_instance.postgres.public_ip_address}' }}:5432/{{ '${google_sql_database.db.name}' }}{% else %}sqlite:///mlflow.db{% endif %} --default-artifact-root {% if bucket_configs %}{% for config in bucket_configs %}{% if config.create %}gs://{{ config.bucket_name }}{% endif %}{% endfor %}{% else %}./mlflow-artifacts{% endif %}"]
+    command: ["-c", "{% if flags.needs_postgres %}echo 'Waiting for PostgreSQL to be ready...' && until pg_isready -h {{ '${google_sql_database_instance.postgres.public_ip_address}' }} -p 5432 -U {{ flags.first_tool_name }}; do echo 'PostgreSQL not ready yet, waiting...' && sleep 5; done && echo 'PostgreSQL is ready! Starting MLflow...' && {% endif %}mlflow server --host 0.0.0.0 --port 5000 --backend-store-uri {% if flags.needs_postgres %}postgresql+psycopg2://{{ flags.first_tool_name }}:{{ '${urlencode(random_password.db_password.result)}' }}@{{ '${google_sql_database_instance.postgres.public_ip_address}' }}:5432/{{ '${google_sql_database.db.name}' }}{% else %}sqlite:///mlflow.db{% endif %} --default-artifact-root {% if bucket_configs %}{% for config in bucket_configs %}{% if config.create %}gs://{{ config.bucket_name }}{% endif %}{% endfor %}{% else %}./mlflow-artifacts{% endif %}"]
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
       interval: 30s
@@ -1299,7 +1299,7 @@ if [ -f feature_store.yaml.template ]; then
         sed -i "s|\$FEAST_ONLINE_STORE_USER|$${FEAST_ONLINE_STORE_USER:-feast}|g" feature_store.yaml
         sed -i "s|\$FEAST_ONLINE_STORE_PASSWORD|$${FEAST_ONLINE_STORE_PASSWORD:-}|g" feature_store.yaml
         sed -i "s|\$FEAST_OFFLINE_STORE_PROJECT|$${FEAST_OFFLINE_STORE_PROJECT:-}|g" feature_store.yaml
-        sed -i "s|\$FEAST_OFFLINE_STORE_DATASET|$${FEAST_OFFLINE_STORE_DATASET:-feast_offline_store}|g" feature_store.yaml
+        sed -i "s|\$FEAST_OFFLINE_STORE_DATASET|$${FEAST_OFFLINE_STORE_DATASET:-feast_offline_store_{{ stack_name }}_{{ project_id }}_{{ name_hash }} }|g" feature_store.yaml
         echo "✅ Feature store configuration updated with manual substitution"
     fi
 fi
@@ -1394,7 +1394,7 @@ customer = Entity(name="customer", join_keys=["customer_id"])
 # Define a data source from BigQuery for sample sales data
 sample_sales_source = BigQuerySource(
     name="sample_sales_source",
-    table="{{ project_id }}.{{ flags.feast_params.get('bigquery_dataset', 'feast_offline_store') }}.sample_sales_data",
+    table="{{ project_id }}.{{ flags.feast_params.get('bigquery_dataset', 'feast_offline_store_' ~ stack_name ~ '_' ~ project_id ~ '_' ~ name_hash) }}.sample_sales_data",
     timestamp_field="sale_date",
     created_timestamp_column="created_timestamp",
 )
@@ -1449,7 +1449,7 @@ sales_activity_v1 = FeatureService(
 # Define a data source from BigQuery for driver data (fallback)
 driver_stats_source = BigQuerySource(
     name="driver_hourly_stats_source",
-    table="{{ project_id }}.{{ flags.feast_params.get('bigquery_dataset', 'feast_offline_store') }}.driver_hourly_stats",
+    table="{{ project_id }}.{{ flags.feast_params.get('bigquery_dataset', 'feast_offline_store_' ~ stack_name ~ '_' ~ project_id ~ '_' ~ name_hash) }}.driver_hourly_stats",
     timestamp_field="event_timestamp",
     created_timestamp_column="created_timestamp",
 )
@@ -2586,12 +2586,12 @@ RemainAfterExit=true
 User=$CURRENT_USER
 Group=$CURRENT_USER
 WorkingDirectory=/home/$CURRENT_USER/deployml/docker
-Environment=MLFLOW_BACKEND_STORE_URI={% if flags.needs_postgres %}postgresql+psycopg2://{{ flags.first_tool_name }}:{{ '${random_password.db_password.result}' }}@{{ '${google_sql_database_instance.postgres.public_ip_address}' }}:5432/{{ '${google_sql_database.db.name}' }}{% else %}sqlite:///mlflow.db{% endif %}
+Environment=MLFLOW_BACKEND_STORE_URI={% if flags.needs_postgres %}postgresql+psycopg2://{{ flags.first_tool_name }}:{{ '${urlencode(random_password.db_password.result)}' }}@{{ '${google_sql_database_instance.postgres.public_ip_address}' }}:5432/{{ '${google_sql_database.db.name}' }}{% else %}sqlite:///mlflow.db{% endif %}
 Environment=MLFLOW_DEFAULT_ARTIFACT_ROOT={% if bucket_configs %}{% for config in bucket_configs %}{% if config.create %}gs://{{ config.bucket_name }}{% endif %}{% endfor %}{% else %}./mlflow-artifacts{% endif %}
 {% if flags.needs_feast and flags.needs_postgres %}
 # FEAST PostgreSQL environment variables for Docker Compose
 Environment=FEAST_REGISTRY_TYPE=sql
-Environment=FEAST_REGISTRY_PATH={% if flags.needs_postgres %}postgresql+psycopg2://{{ '${var.feast_database_user}' }}:{{ '${random_password.db_password.result}' }}@{{ '${google_sql_database_instance.postgres.public_ip_address}' }}:5432/{{ '${var.feast_database_name}' }}{% else %}data/registry.db{% endif %}
+Environment=FEAST_REGISTRY_PATH={% if flags.needs_postgres %}postgresql+psycopg2://{{ '${var.feast_database_user}' }}:{{ '${urlencode(random_password.db_password.result)}' }}@{{ '${google_sql_database_instance.postgres.public_ip_address}' }}:5432/{{ '${var.feast_database_name}' }}{% else %}data/registry.db{% endif %}
 Environment=FEAST_ONLINE_STORE_TYPE={% if flags.needs_postgres %}postgres{% else %}sqlite{% endif %}
 Environment=FEAST_ONLINE_STORE_HOST={% if flags.needs_postgres %}{{ '${google_sql_database_instance.postgres.public_ip_address}' }}{% else %}localhost{% endif %}
 Environment=FEAST_ONLINE_STORE_PORT={% if flags.needs_postgres %}5432{% else %}3306{% endif %}
@@ -2600,7 +2600,7 @@ Environment=FEAST_ONLINE_STORE_USER={% if flags.needs_postgres %}{{ '${var.feast
 Environment=FEAST_ONLINE_STORE_PASSWORD={% if flags.needs_postgres %}{{ '${random_password.db_password.result}' }}{% else %}feast{% endif %}
 Environment=FEAST_OFFLINE_STORE_TYPE=bigquery
 Environment=FEAST_OFFLINE_STORE_PROJECT={{ project_id }}
-Environment=FEAST_OFFLINE_STORE_DATASET={{ flags.feast_params.get('bigquery_dataset', 'feast_offline_store') }}
+Environment=FEAST_OFFLINE_STORE_DATASET={{ flags.feast_params.get('bigquery_dataset', 'feast_offline_store_' ~ stack_name ~ '_' ~ project_id ~ '_' ~ name_hash) }}
 Environment=FEAST_ARTIFACT_BUCKET={% if bucket_configs %}{% for config in bucket_configs %}{% if config.create %}{{ config.bucket_name }}{% endif %}{% endfor %}{% else %}{% endif %}
 Environment=GOOGLE_CLOUD_PROJECT={{ project_id }}
 Environment=USE_POSTGRES={% if flags.needs_postgres %}true{% else %}false{% endif %}
@@ -2853,7 +2853,7 @@ EOF
 
 # Firewall rules for MLflow access
 resource "google_compute_firewall" "allow_mlflow" {
-  name    = "allow-mlflow"
+  name    = "{{ ('dl-' ~ name_hash ~ '-allow-mlflow') | lower }}"
   network = "default"
   
   # Explicit dependency to ensure APIs are ready FIRST
@@ -2869,7 +2869,7 @@ resource "google_compute_firewall" "allow_mlflow" {
 
 # Firewall rule to allow FastAPI traffic
 resource "google_compute_firewall" "allow_fastapi" {
-  name    = "allow-fastapi"
+  name    = "{{ ('dl-' ~ name_hash ~ '-allow-fastapi') | lower }}"
   network = "default"
   
   # Explicit dependency to ensure APIs are ready FIRST
@@ -2886,7 +2886,7 @@ resource "google_compute_firewall" "allow_fastapi" {
 {% if flags.needs_feast %}
 # Firewall rule to allow Feast server traffic
 resource "google_compute_firewall" "allow_feast" {
-  name    = "allow-feast"
+  name    = "{{ ('dl-' ~ name_hash ~ '-allow-feast') | lower }}"
   network = "default"
   
   # Explicit dependency to ensure APIs are ready FIRST
@@ -2904,7 +2904,7 @@ resource "google_compute_firewall" "allow_feast" {
 {% if flags.needs_feast %}
 # Firewall rule to allow Feast FastAPI traffic (port 9000)
 resource "google_compute_firewall" "allow_feast_fastapi" {
-  name    = "allow-feast-fastapi-9000"
+  name    = "{{ ('dl-' ~ name_hash ~ '-allow-feast-fastapi-9000') | lower }}"
   network = "default"
 
   depends_on = [null_resource.api_readiness_check]
@@ -2921,7 +2921,7 @@ resource "google_compute_firewall" "allow_feast_fastapi" {
 {% if flags.needs_grafana %}
 # Firewall rule to allow Grafana traffic
 resource "google_compute_firewall" "allow_grafana" {
-  name    = "allow-grafana"
+  name    = "{{ ('dl-' ~ name_hash ~ '-allow-grafana') | lower }}"
   network = "default"
   
   # Explicit dependency to ensure APIs are ready FIRST
@@ -2939,7 +2939,7 @@ resource "google_compute_firewall" "allow_grafana" {
 {% if flags.needs_airflow %}
 # Firewall rule to allow Airflow traffic
 resource "google_compute_firewall" "allow_airflow" {
-  name    = "allow-airflow"
+  name    = "{{ ('dl-' ~ name_hash ~ '-allow-airflow') | lower }}"
   network = "default"
   
   # Explicit dependency to ensure APIs are ready FIRST
@@ -3063,7 +3063,7 @@ output "feast_deployment_info" {
     separate_database = var.feast_separate_database
     registry_type = {% if flags.needs_postgres %}"sql"{% else %}"file"{% endif %}
     offline_store = "bigquery"
-    offline_dataset = "{{ flags.feast_params.get('bigquery_dataset', 'feast_offline_store') }}"
+    offline_dataset = "{{ flags.feast_params.get('bigquery_dataset', 'feast_offline_store_' ~ stack_name ~ '_' ~ project_id ~ '_' ~ name_hash) }}"
     validation_script = "/home/deployml/docker/validate_feast.sh"
     deployment_type = "vm"
   }

@@ -63,7 +63,7 @@ def check_infracost_available() -> bool:
         return False
 
 
-def run_infracost_breakdown(terraform_dir: Path) -> Optional[Dict]:
+def run_infracost_breakdown(terraform_dir: Path, usage_file: Optional[Path] = None) -> Optional[Dict]:
     """
     Run infracost breakdown analysis on the terraform directory.
 
@@ -78,15 +78,19 @@ def run_infracost_breakdown(terraform_dir: Path) -> Optional[Dict]:
 
     try:
         # Run infracost breakdown and capture JSON output
+        cmd = [
+            "infracost",
+            "breakdown",
+            "--path",
+            str(terraform_dir),
+            "--format",
+            "json",
+        ]
+        if usage_file is not None:
+            cmd.extend(["--usage-file", str(usage_file)])
+
         result = subprocess.run(
-            [
-                "infracost",
-                "breakdown",
-                "--path",
-                str(terraform_dir),
-                "--format",
-                "json",
-            ],
+            cmd,
             cwd=terraform_dir,
             capture_output=True,
             text=True,
@@ -281,7 +285,7 @@ def format_cost_for_confirmation(monthly_cost: float, currency: str) -> str:
 
 
 def run_infracost_analysis(
-    terraform_dir: Path, warning_threshold: float = 100.0
+    terraform_dir: Path, warning_threshold: float = 100.0, usage_file: Optional[Path] = None
 ) -> Optional[CostAnalysis]:
     """
     Run complete infracost analysis workflow.
@@ -304,7 +308,7 @@ def run_infracost_analysis(
     typer.echo("💰 Running cost analysis...")
 
     # Run infracost breakdown
-    raw_data = run_infracost_breakdown(terraform_dir)
+    raw_data = run_infracost_breakdown(terraform_dir, usage_file=usage_file)
     if not raw_data:
         return None
 
