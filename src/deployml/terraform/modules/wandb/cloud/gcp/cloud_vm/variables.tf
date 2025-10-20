@@ -122,3 +122,16 @@ variable "startup_script" {
   description = "Custom startup script (optional, overrides default)"
   default = ""
 } 
+
+# New: VM user management
+variable "vm_user" {
+  type        = string
+  description = "Linux username to create and use for deployment"
+  default     = ""
+}
+
+variable "grant_sudo" {
+  type        = bool
+  description = "Whether to grant passwordless sudo to vm_user"
+  default     = true
+}

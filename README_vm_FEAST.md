@@ -36,7 +36,7 @@ sudo docker ps
 #### 1.3 Copy Parquet File to VM
 ```bash
 # From your local machine
-gcloud compute scp house_data.parquet skier@mlflow-postgres-vm-instance:/home/root/deployml/
+gcloud compute scp house_data.parquet <username>@mlflow-postgres-vm-instance:/home/<username>/deployml/
 ```
 
 ### 2. Feast Configuration
