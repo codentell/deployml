@@ -20,6 +20,18 @@ We successfully deployed a Feast feature store on a GCP VM with:
 
 ## Step-by-Step Process
 
+### .1 If Using CloudSQL Backend
+
+1. Navigate to Cloud SQL Instances : In the Google Cloud console, go to the Cloud SQL Instances page.
+2. Select your instance : Click on the name of the Cloud SQL instance you want to modify. This will take you to its Overview page.
+3. Edit the instance : Click the "Edit" button at the top of the instance's Overview page.
+4. Find the "Flags and parameters" section : Scroll down the configuration options until you find the "Flags and parameters" section under "Advanced options."
+5. Add or modify the max_connections flag :
+   - If the max_connections flag is not already listed, click "Add a database flag."
+   - From the dropdown menu, select max_connections.
+   - Set max_connections to 20.
+6. Save changes : Click "Save" at the bottom of the page to apply your changes.
+
 ### 1. Initial Setup and Troubleshooting
 
 #### 1.1 Connect to the VM
@@ -210,11 +222,6 @@ docker exec -it feast-server feast apply
 ```
 Applying changes for project house_sales
 Deploying infrastructure for house_features
-```
-
-#### 4.1.1 Remove example features (if present)
-```bash
-docker exec -it feast-server sh -lc 'rm -f /app/feature_repo/example_features.py || true'
 ```
 
 #### 4.2 Verify Registration
