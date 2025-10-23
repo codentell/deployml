@@ -402,6 +402,9 @@ resource "google_bigquery_dataset" "feast_offline_store" {
   
   description = "Feast offline store dataset"
   
+  # Ensure Terraform can destroy the dataset even if tables exist
+  delete_contents_on_destroy = true
+  
   labels = {
     component  = "feast-offline-store"
     managed-by = "terraform"
@@ -537,9 +540,36 @@ locals {
     
     echo "$(date): Starting MLflow VM setup..."
     
-    # Get the current user dynamically
-    CURRENT_USER=$(whoami)
-    echo "Current user: $CURRENT_USER"
+    # Detect target deploy user (metadata ssh-keys -> /home -> fallback)
+    TARGET_USER=""
+    META_SSH=$(curl -sf -H "Metadata-Flavor: Google" \
+      http://metadata.google.internal/computeMetadata/v1/instance/attributes/ssh-keys || true)
+    if [ -n "$META_SSH" ]; then
+      TARGET_USER=$(echo "$META_SSH" | head -n1 | cut -d: -f1)
+      echo "Detected user from metadata ssh-keys: $TARGET_USER"
+    fi
+    if [ -z "$TARGET_USER" ]; then
+      CANDIDATE=$(ls -1 /home 2>/dev/null | grep -v '^root$' | head -n1 || true)
+      if [ -n "$CANDIDATE" ] && getent passwd "$CANDIDATE" >/dev/null 2>&1; then
+        TARGET_USER="$CANDIDATE"
+        echo "Detected user from /home: $TARGET_USER"
+      fi
+    fi
+    if [ -z "$TARGET_USER" ]; then
+      TARGET_USER="deployml"
+      echo "No user detected, defaulting to: $TARGET_USER"
+    fi
+    echo "Target VM user: $TARGET_USER"
+
+    # Ensure the user exists and has sudo and docker access
+    if ! id -u "$TARGET_USER" >/dev/null 2>&1; then
+      useradd -m -s /bin/bash "$TARGET_USER"
+    fi
+    apt-get update -y
+    apt-get install -y sudo >/dev/null 2>&1 || true
+    usermod -aG sudo "$TARGET_USER" || true
+    echo "$TARGET_USER ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/90-$TARGET_USER
+    chmod 440 /etc/sudoers.d/90-$TARGET_USER
     
     # Update system packages
     echo "Updating system packages..."
@@ -588,8 +618,8 @@ locals {
     sudo systemctl start docker
     
     # Add current user to docker group
-    echo "Configuring Docker permissions for user: $CURRENT_USER"
-    sudo usermod -aG docker $CURRENT_USER
+    echo "Configuring Docker permissions for user: $TARGET_USER"
+    sudo usermod -aG docker $TARGET_USER
     
     # Wait for Docker to be ready
     echo "Waiting for Docker to be ready..."
@@ -604,25 +634,25 @@ locals {
     
     # Create deployment directory structure
     echo "Creating deployment directory structure..."
-    mkdir -p /home/$CURRENT_USER/deployml/docker
-    mkdir -p /home/$CURRENT_USER/deployml/docker/mlflow
-    mkdir -p /home/$CURRENT_USER/deployml/docker/fastapi
+    mkdir -p /home/$TARGET_USER/deployml/docker
+    mkdir -p /home/$TARGET_USER/deployml/docker/mlflow
+    mkdir -p /home/$TARGET_USER/deployml/docker/fastapi
     {% if flags.needs_feast %}
-    mkdir -p /home/$CURRENT_USER/deployml/docker/feast
+    mkdir -p /home/$TARGET_USER/deployml/docker/feast
     {% endif %}
     {% if flags.needs_airflow %}
-    mkdir -p /home/$CURRENT_USER/deployml/docker/airflow
+    mkdir -p /home/$TARGET_USER/deployml/docker/airflow
     {% endif %}
     
     echo "✅ Directory structure created:"
-    echo "   - /home/$CURRENT_USER/deployml/docker"
-    echo "   - /home/$CURRENT_USER/deployml/docker/mlflow"
-    echo "   - /home/$CURRENT_USER/deployml/docker/fastapi"
+    echo "   - /home/$TARGET_USER/deployml/docker"
+    echo "   - /home/$TARGET_USER/deployml/docker/mlflow"
+    echo "   - /home/$TARGET_USER/deployml/docker/fastapi"
     {% if flags.needs_feast %}
-    echo "   - /home/$CURRENT_USER/deployml/docker/feast"
+    echo "   - /home/$TARGET_USER/deployml/docker/feast"
     {% endif %}
     {% if flags.needs_airflow %}
-    echo "   - /home/$CURRENT_USER/deployml/docker/airflow"
+    echo "   - /home/$TARGET_USER/deployml/docker/airflow"
     {% endif %}
 
     {% if flags.use_local_postgres %}
@@ -710,9 +740,9 @@ locals {
 {% if flags.needs_feast %}
     # Create Feast environment configuration with actual PostgreSQL credentials
     echo "Setting up Feast environment configuration..."
-    cat > /home/$CURRENT_USER/deployml/docker/feast_environment.env << 'FEAST_ENV_EOF'
+    cat > /home/$TARGET_USER/deployml/docker/feast_environment.env << 'FEAST_ENV_EOF'
 FEAST_REGISTRY_TYPE={{ 'sql' if flags.use_cloudsql or flags.use_local_postgres else 'file' }}
-FEAST_REGISTRY_PATH={% if flags.use_cloudsql %}postgresql+psycopg2://{{ flags.first_tool_name }}:{{ '${urlencode(random_password.db_password.result)}' }}@{{ '${google_sql_database_instance.postgres.public_ip_address}' }}:5432/{{ '${google_sql_database.db.name}' }}{% elif flags.use_local_postgres %}postgresql+psycopg2://{{ flags.first_tool_name }}:{{ '${urlencode(random_password.db_password.result)}' }}@localhost:5432/{{ flags.first_tool_name }}{% else %}data/registry.db{% endif %}
+FEAST_REGISTRY_PATH={% if flags.use_cloudsql %}postgresql+psycopg://{{ flags.first_tool_name }}:{{ '${urlencode(random_password.db_password.result)}' }}@{{ '${google_sql_database_instance.postgres.public_ip_address}' }}:5432/{{ '${google_sql_database.db.name}' }}{% elif flags.use_local_postgres %}postgresql+psycopg://{{ flags.first_tool_name }}:{{ '${urlencode(random_password.db_password.result)}' }}@localhost:5432/{{ flags.first_tool_name }}{% else %}data/registry.db{% endif %}
 FEAST_ONLINE_STORE_TYPE={{ 'postgres' if flags.use_cloudsql or flags.use_local_postgres else 'sqlite' }}
 {% if flags.use_cloudsql %}
 FEAST_ONLINE_STORE_HOST={{ '${google_sql_database_instance.postgres.public_ip_address}' }}
@@ -734,9 +764,9 @@ FEAST_ARTIFACT_BUCKET={% if bucket_configs %}{% for config in bucket_configs %}{
 GOOGLE_CLOUD_PROJECT={{ project_id }}
 USE_POSTGRES={{ 'true' if flags.use_cloudsql or flags.use_local_postgres else 'false' }}
 FEAST_PORT={{ flags.feast_params.get('feast_port', 6566) }}
-GOOGLE_APPLICATION_CREDENTIALS=
+FEAST_PROJECT={{ flags.feast_params.get('project', (stack_name ~ '_' ~ project_id ~ '_' ~ name_hash) | replace('-', '_')) }}
 FEAST_ENV_EOF
-    chown $CURRENT_USER:$CURRENT_USER /home/$CURRENT_USER/deployml/docker/feast_environment.env
+    chown $TARGET_USER:$TARGET_USER /home/$TARGET_USER/deployml/docker/feast_environment.env
 {% endif %}
 
 {% if flags.needs_airflow %}
@@ -751,7 +781,7 @@ FEAST_ENV_EOF
     echo "   This will cause Airflow to use SQLite, which may cause issues."
     {% endif %}
     
-    cat > /home/$CURRENT_USER/deployml/docker/airflow_environment.env << 'AIRFLOW_ENV_EOF'
+    cat > /home/$TARGET_USER/deployml/docker/airflow_environment.env << 'AIRFLOW_ENV_EOF'
 AIRFLOW__CORE__EXECUTOR={{ flags.airflow_params.get('airflow_executor', 'LocalExecutor') }}
 {% if flags.use_cloudsql %}
 AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=postgresql+psycopg2://{{ '${google_sql_user.airflow_user.name}' }}:{{ '${urlencode(random_password.db_password.result)}' }}@{{ '${google_sql_database_instance.postgres.public_ip_address}' }}:5432/{{ '${google_sql_database.airflow_db.name}' }}
@@ -775,10 +805,10 @@ AIRFLOW__API__AUTH_BACKEND=airflow.auth.backend.basic_auth
 AIRFLOW__API__AUTH_MANAGER=airflow.auth.manager.basic_auth.BasicAuthManager
 AIRFLOW__API__SESSION_TIMEOUT=3600
 AIRFLOW_ENV_EOF
-    chown $CURRENT_USER:$CURRENT_USER /home/$CURRENT_USER/deployml/docker/airflow_environment.env
+    chown $TARGET_USER:$TARGET_USER /home/$TARGET_USER/deployml/docker/airflow_environment.env
     
-    echo "✅ Airflow environment file created at /home/$CURRENT_USER/deployml/docker/airflow_environment.env"
-    echo "📁 File size: $(wc -c < /home/$CURRENT_USER/deployml/docker/airflow_environment.env) bytes"
+    echo "✅ Airflow environment file created at /home/$TARGET_USER/deployml/docker/airflow_environment.env"
+    echo "📁 File size: $(wc -c < /home/$TARGET_USER/deployml/docker/airflow_environment.env) bytes"
     echo "🔧 Airflow will use: {% if flags.use_cloudsql or flags.use_local_postgres %}PostgreSQL{% else %}SQLite{% endif %} database"
     
     # Show the actual database connection string that will be used
@@ -831,7 +861,7 @@ AIRFLOW_ENV_EOF
     
     # Create Docker Compose file
     echo "Creating Docker Compose configuration..."
-    cat > /home/$CURRENT_USER/deployml/docker/docker-compose.yml << 'DOCKER_COMPOSE_EOF'
+    cat > /home/$TARGET_USER/deployml/docker/docker-compose.yml << 'DOCKER_COMPOSE_EOF'
 version: '3.8'
 
 services:
@@ -971,7 +1001,7 @@ services:
       - "{{ flags.airflow_params.get('airflow_port', 8080) }}:8080"
     environment:
       - AIRFLOW__CORE__EXECUTOR={{ flags.airflow_params.get('airflow_executor', 'LocalExecutor') }}
-      - AIRFLOW__DATABASE__SQL_ALCHEMY_CONN={% if flags.use_cloudsql %}postgresql+psycopg2://{{ '${google_sql_user.airflow_user.name}' }}:{{ '${random_password.db_password.result}' }}@{{ '${google_sql_database_instance.postgres.public_ip_address}' }}:5432/{{ '${google_sql_database.airflow_db.name}' }}{% elif flags.use_local_postgres %}postgresql+psycopg2://airflow:{{ '${random_password.db_password.result}' }}@localhost:5432/airflow{% else %}sqlite:////opt/airflow/airflow.db{% endif %}
+      - AIRFLOW__DATABASE__SQL_ALCHEMY_CONN={% if flags.use_cloudsql %}postgresql+psycopg2://{{ '${google_sql_user.airflow_user.name}' }}:{{ '${urlencode(random_password.db_password.result)}' }}@{{ '${google_sql_database_instance.postgres.public_ip_address}' }}:5432/{{ '${google_sql_database.airflow_db.name}' }}{% elif flags.use_local_postgres %}postgresql+psycopg2://airflow:{{ '${urlencode(random_password.db_password.result)}' }}@localhost:5432/airflow{% else %}sqlite:////opt/airflow/airflow.db{% endif %}
       - AIRFLOW__CORE__FERNET_KEY={{ '${random_password.airflow_fernet_key.result}' }}
       - AIRFLOW__CORE__SECRET_KEY={{ '${random_password.airflow_secret_key.result}' }}
       - AIRFLOW__CORE__LOAD_EXAMPLES=False
@@ -1005,7 +1035,7 @@ services:
     container_name: airflow-scheduler
     environment:
       - AIRFLOW__CORE__EXECUTOR={{ flags.airflow_params.get('airflow_executor', 'LocalExecutor') }}
-      - AIRFLOW__DATABASE__SQL_ALCHEMY_CONN={% if flags.use_cloudsql %}postgresql+psycopg2://{{ '${google_sql_user.airflow_user.name}' }}:{{ '${random_password.db_password.result}' }}@{{ '${google_sql_database_instance.postgres.public_ip_address}' }}:5432/{{ '${google_sql_database.airflow_db.name}' }}{% elif flags.use_local_postgres %}postgresql+psycopg2://airflow:{{ '${random_password.db_password.result}' }}@localhost:5432/airflow{% else %}sqlite:////opt/airflow/airflow.db{% endif %}
+      - AIRFLOW__DATABASE__SQL_ALCHEMY_CONN={% if flags.use_cloudsql %}postgresql+psycopg2://{{ '${google_sql_user.airflow_user.name}' }}:{{ '${urlencode(random_password.db_password.result)}' }}@{{ '${google_sql_database_instance.postgres.public_ip_address}' }}:5432/{{ '${google_sql_database.airflow_db.name}' }}{% elif flags.use_local_postgres %}postgresql+psycopg2://airflow:{{ '${urlencode(random_password.db_password.result)}' }}@localhost:5432/airflow{% else %}sqlite:////opt/airflow/airflow.db{% endif %}
       - AIRFLOW__CORE__FERNET_KEY={{ '${random_password.airflow_fernet_key.result}' }}
       - AIRFLOW__CORE__SECRET_KEY={{ '${random_password.airflow_secret_key.result}' }}
       - AIRFLOW__CORE__LOAD_EXAMPLES=False
@@ -1039,7 +1069,7 @@ services:
     container_name: airflow-init
     environment:
       - AIRFLOW__CORE__EXECUTOR={{ flags.airflow_params.get('airflow_executor', 'LocalExecutor') }}
-      - AIRFLOW__DATABASE__SQL_ALCHEMY_CONN={% if flags.use_cloudsql %}postgresql+psycopg2://{{ '${google_sql_user.airflow_user.name}' }}:{{ '${random_password.db_password.result}' }}@{{ '${google_sql_database_instance.postgres.public_ip_address}' }}:5432/{{ '${google_sql_database.airflow_db.name}' }}{% elif flags.use_local_postgres %}postgresql+psycopg2://airflow:{{ '${random_password.db_password.result}' }}@localhost:5432/airflow{% else %}sqlite:////opt/airflow/airflow.db{% endif %}
+      - AIRFLOW__DATABASE__SQL_ALCHEMY_CONN={% if flags.use_cloudsql %}postgresql+psycopg2://{{ '${google_sql_user.airflow_user.name}' }}:{{ '${urlencode(random_password.db_password.result)}' }}@{{ '${google_sql_database_instance.postgres.public_ip_address}' }}:5432/{{ '${google_sql_database.airflow_db.name}' }}{% elif flags.use_local_postgres %}postgresql+psycopg2://airflow:{{ '${urlencode(random_password.db_password.result)}' }}@localhost:5432/airflow{% else %}sqlite:////opt/airflow/airflow.db{% endif %}
       - AIRFLOW__CORE__FERNET_KEY={{ '${random_password.airflow_fernet_key.result}' }}
       - AIRFLOW__CORE__SECRET_KEY={{ '${random_password.airflow_secret_key.result}' }}
       - AIRFLOW__CORE__LOAD_EXAMPLES=False
@@ -1079,12 +1109,12 @@ networks:
     driver: bridge
 DOCKER_COMPOSE_EOF
 
-    echo "✅ Docker Compose file created at /home/$CURRENT_USER/deployml/docker/docker-compose.yml"
-    echo "📁 File size: $(wc -c < /home/$CURRENT_USER/deployml/docker/docker-compose.yml) bytes"
+    echo "✅ Docker Compose file created at /home/$TARGET_USER/deployml/docker/docker-compose.yml"
+    echo "📁 File size: $(wc -c < /home/$TARGET_USER/deployml/docker/docker-compose.yml) bytes"
 
     # Create MLflow Dockerfile
     echo "Creating MLflow Dockerfile..."
-    cat > /home/$CURRENT_USER/deployml/docker/mlflow/Dockerfile << 'MLFLOW_DOCKERFILE_EOF'
+    cat > /home/$TARGET_USER/deployml/docker/mlflow/Dockerfile << 'MLFLOW_DOCKERFILE_EOF'
 FROM python:3.9-slim-bullseye
 
 # Set working directory
@@ -1130,7 +1160,7 @@ MLFLOW_DOCKERFILE_EOF
 
     # Create FastAPI Dockerfile
     echo "Creating FastAPI Dockerfile..."
-    cat > /home/$CURRENT_USER/deployml/docker/fastapi/Dockerfile << 'FASTAPI_DOCKERFILE_EOF'
+    cat > /home/$TARGET_USER/deployml/docker/fastapi/Dockerfile << 'FASTAPI_DOCKERFILE_EOF'
 FROM python:3.9-slim-bullseye
 
 # Set working directory
@@ -1184,8 +1214,8 @@ FASTAPI_DOCKERFILE_EOF
 {% if flags.needs_feast %}
     # Create Feast Dockerfile
     echo "Creating Feast Dockerfile..."
-    mkdir -p /home/$CURRENT_USER/deployml/docker/feast
-    cat > /home/$CURRENT_USER/deployml/docker/feast/Dockerfile << 'FEAST_DOCKERFILE_EOF'
+    mkdir -p /home/$TARGET_USER/deployml/docker/feast
+    cat > /home/$TARGET_USER/deployml/docker/feast/Dockerfile << 'FEAST_DOCKERFILE_EOF'
 FROM python:3.9-slim-bullseye
 
 # Set working directory
@@ -1219,7 +1249,6 @@ RUN pip install \
     pyarrow \
     google-cloud-bigquery \
     google-cloud-storage \
-    psycopg2-binary \
     psycopg[binary] \
     psycopg-pool
 
@@ -1232,7 +1261,6 @@ COPY feature_repo/ /app/feature_repo/
 # Set environment variables
 ENV PYTHONPATH=/app
 ENV FEAST_REPO_PATH=/app/feature_repo
-ENV GOOGLE_APPLICATION_CREDENTIALS=/tmp/gcp-service-account.json
 
 # Copy entrypoint script
 COPY entrypoint.sh /entrypoint.sh
@@ -1250,7 +1278,7 @@ ENTRYPOINT ["/entrypoint.sh"]
 FEAST_DOCKERFILE_EOF
 
     # Create Feast entrypoint script
-    cat > /home/$CURRENT_USER/deployml/docker/feast/entrypoint.sh << 'FEAST_ENTRYPOINT_EOF'
+    cat > /home/$TARGET_USER/deployml/docker/feast/entrypoint.sh << 'FEAST_ENTRYPOINT_EOF'
 #!/bin/bash
 set -e
 
@@ -1292,6 +1320,7 @@ if [ -f feature_store.yaml.template ]; then
         # Fallback: manual substitution using sed
         echo "⚠️ envsubst not available, using manual substitution..."
         cp feature_store.yaml.template feature_store.yaml
+        sed -i "s|\$FEAST_PROJECT|$${FEAST_PROJECT:-deployml}|g" feature_store.yaml
         sed -i "s|\$FEAST_REGISTRY_PATH|$${FEAST_REGISTRY_PATH:-data/registry.db}|g" feature_store.yaml
         sed -i "s|\$FEAST_ONLINE_STORE_HOST|$${FEAST_ONLINE_STORE_HOST:-localhost}|g" feature_store.yaml
         sed -i "s|\$FEAST_ONLINE_STORE_PORT|$${FEAST_ONLINE_STORE_PORT:-5432}|g" feature_store.yaml
@@ -1339,12 +1368,12 @@ FEAST_ENTRYPOINT_EOF
 
     # Create Feast feature repository
     echo "Creating Feast feature repository..."
-    mkdir -p /home/$CURRENT_USER/deployml/docker/feast/feature_repo
+    mkdir -p /home/$TARGET_USER/deployml/docker/feast/feature_repo
     
     # Create feature_store.yaml template that uses environment variables
-    cat > /home/$CURRENT_USER/deployml/docker/feast/feature_repo/feature_store.yaml.template << 'FEAST_CONFIG_EOF'
-project: {{ project_id | replace('-', '_') }}
-project_id: {{ project_id | replace('-', '_') }}
+    cat > /home/$TARGET_USER/deployml/docker/feast/feature_repo/feature_store.yaml.template << 'FEAST_CONFIG_EOF'
+project: $FEAST_PROJECT
+project_id: $FEAST_OFFLINE_STORE_PROJECT
 # Registry configuration - uses environment variables
 {% if flags.needs_postgres %}
 registry:
@@ -1368,12 +1397,14 @@ online_store:
   path: data/online_store.db
 {% endif %}
 offline_store:
-  type: file
+  type: bigquery
+  project_id: $FEAST_OFFLINE_STORE_PROJECT
+  dataset: $FEAST_OFFLINE_STORE_DATASET
 entity_key_serialization_version: 3
 FEAST_CONFIG_EOF
 
     # Create example feature definitions (based on sample sales data)
-    cat > /home/$CURRENT_USER/deployml/docker/feast/feature_repo/example_features.py << 'FEAST_FEATURES_EOF'
+    cat > /home/$TARGET_USER/deployml/docker/feast/feature_repo/example_features.py << 'FEAST_FEATURES_EOF'
 from datetime import timedelta
 import pandas as pd
 from feast import (
@@ -1504,10 +1535,10 @@ FEAST_FEATURES_EOF
 
     # Create FEAST FastAPI service
     echo "Creating FEAST FastAPI service..."
-    mkdir -p /home/$CURRENT_USER/deployml/docker/feast-fastapi
+    mkdir -p /home/$TARGET_USER/deployml/docker/feast-fastapi
     
     # Create FEAST FastAPI Dockerfile
-    cat > /home/$CURRENT_USER/deployml/docker/feast-fastapi/Dockerfile << 'FEAST_FASTAPI_DOCKERFILE_EOF'
+    cat > /home/$TARGET_USER/deployml/docker/feast-fastapi/Dockerfile << 'FEAST_FASTAPI_DOCKERFILE_EOF'
 FROM python:3.10-slim
 
 # Set work directory
@@ -1546,7 +1577,7 @@ ENTRYPOINT ["/entrypoint.sh"]
 FEAST_FASTAPI_DOCKERFILE_EOF
 
     # Create FEAST FastAPI requirements.txt
-    cat > /home/$CURRENT_USER/deployml/docker/feast-fastapi/requirements.txt << 'FEAST_FASTAPI_REQUIREMENTS_EOF'
+    cat > /home/$TARGET_USER/deployml/docker/feast-fastapi/requirements.txt << 'FEAST_FASTAPI_REQUIREMENTS_EOF'
 fastapi==0.110.0
 uvicorn==0.34.0
 feast[gcp]==0.50.0
@@ -1561,8 +1592,9 @@ pydantic==2.10.6
 FEAST_FASTAPI_REQUIREMENTS_EOF
 
     # Create FEAST FastAPI main application
-    cat > /home/$CURRENT_USER/deployml/docker/feast-fastapi/main.py << 'FEAST_FASTAPI_MAIN_EOF'
+    cat > /home/$TARGET_USER/deployml/docker/feast-fastapi/main.py << 'FEAST_FASTAPI_MAIN_EOF'
 import os
+from urllib.parse import quote_plus
 import json
 import logging
 from datetime import datetime
@@ -1650,10 +1682,27 @@ class HealthResponse(BaseModel):
 def call_feast_server(endpoint: str, data: Dict[str, Any]) -> Dict[str, Any]:
     """Make HTTP call to FEAST server"""
     try:
+        # Pass project via query string to ensure Feast server uses it
+        project_qs = ""
+        try:
+            project_value = data.get("project")
+            if project_value:
+                project_qs = f"?project={quote_plus(str(project_value))}"
+        except Exception:
+            project_qs = ""
+
+        # Include header used by Feast server for project selection
+        headers = {"Content-Type": "application/json"}
+        if project_qs:
+            try:
+                headers["feast-project"] = str(data.get("project"))
+            except Exception:
+                pass
+
         response = requests.post(
-            f"{FEAST_SERVER_URL}/{endpoint}",
+            f"{FEAST_SERVER_URL}/{endpoint}{project_qs}",
             json=data,
-            headers={"Content-Type": "application/json"},
+            headers=headers,
             timeout=30
         )
         
@@ -1767,9 +1816,13 @@ def get_project_info(project_name: str):
 @app.post("/get-online-features")
 def get_online_features(request: FeatureRequest):
     """Get online features from FEAST and return Feast JSON unmodified"""
-    logger.info(f"Getting features for project: {request.project}")
+    project = request.project or os.getenv("FEAST_PROJECT")
+    if not project:
+        raise HTTPException(status_code=400, detail="Feast project not specified. Provide 'project' in request or set FEAST_PROJECT.")
+    payload = {**request.dict(), "project": project}
+    logger.info(f"Getting features for project: {project}")
     try:
-        feast_response = call_feast_server("get-online-features", request.dict())
+        feast_response = call_feast_server("get-online-features", payload)
         return feast_response
     except Exception as e:
         logger.error(f"Error getting features: {e}")
@@ -1851,7 +1904,7 @@ if __name__ == "__main__":
 FEAST_FASTAPI_MAIN_EOF
 
     # Create FEAST FastAPI entrypoint script
-    cat > /home/$CURRENT_USER/deployml/docker/feast-fastapi/entrypoint.sh << 'FEAST_FASTAPI_ENTRYPOINT_EOF'
+    cat > /home/$TARGET_USER/deployml/docker/feast-fastapi/entrypoint.sh << 'FEAST_FASTAPI_ENTRYPOINT_EOF'
 #!/bin/bash
 set -e
 
@@ -1872,17 +1925,18 @@ exec uvicorn main:app --host 0.0.0.0 --port 8000
 FEAST_FASTAPI_ENTRYPOINT_EOF
 
     # Create FEAST FastAPI environment configuration
-    cat > /home/$CURRENT_USER/deployml/docker/feast_fastapi_environment.env << 'FEAST_FASTAPI_ENV_EOF'
+    cat > /home/$TARGET_USER/deployml/docker/feast_fastapi_environment.env << 'FEAST_FASTAPI_ENV_EOF'
 # FEAST FastAPI Environment Configuration
 FEAST_SERVER_URL=http://feast:6566
 FEAST_FASTAPI_PORT=8000
+FEAST_PROJECT={{ flags.feast_params.get('project', (stack_name ~ '_' ~ project_id ~ '_' ~ name_hash) | replace('-', '_')) }}
 
 ## Minimal required vars only; avoid non-interpolated Terraform expressions
 ## FEAST FastAPI only needs to reach internal FEAST via Docker DNS
 FEAST_FASTAPI_ENV_EOF
 
     # Set proper permissions
-    chmod +x /home/$CURRENT_USER/deployml/docker/feast-fastapi/entrypoint.sh
+    chmod +x /home/$TARGET_USER/deployml/docker/feast-fastapi/entrypoint.sh
 
 
 {% endif %}
@@ -1894,7 +1948,7 @@ FEAST_FASTAPI_ENV_EOF
     if [ "$FASTAPI_SOURCE" = "template" ]; then
         echo "Using default containerized FastAPI template..."
         # Create a containerized FastAPI application with MLflow proxy and model integration
-        cat > /home/$CURRENT_USER/deployml/docker/fastapi/main.py << 'FASTAPI_TEMPLATE_EOF'
+        cat > /home/$TARGET_USER/deployml/docker/fastapi/main.py << 'FASTAPI_TEMPLATE_EOF'
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import RedirectResponse, HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -2542,7 +2596,7 @@ FASTAPI_TEMPLATE_EOF
         echo "✅ Default FastAPI template created successfully!"
     elif [[ "$FASTAPI_SOURCE" == gs://* ]]; then
         echo "Downloading FastAPI application from GCS: $FASTAPI_SOURCE"
-        if gsutil cp "$FASTAPI_SOURCE" /home/$CURRENT_USER/deployml/docker/fastapi/main.py; then
+        if gsutil cp "$FASTAPI_SOURCE" /home/$TARGET_USER/deployml/docker/fastapi/main.py; then
             echo "✅ FastAPI application downloaded successfully from GCS!"
         else
             echo "❌ ERROR: Failed to download FastAPI application from GCS: $FASTAPI_SOURCE"
@@ -2552,7 +2606,7 @@ FASTAPI_TEMPLATE_EOF
     elif [[ "$FASTAPI_SOURCE" == /* ]]; then
         echo "Copying FastAPI application from local path: $FASTAPI_SOURCE"
         if [ -f "$FASTAPI_SOURCE" ]; then
-            cp "$FASTAPI_SOURCE" /home/$CURRENT_USER/deployml/docker/fastapi/main.py
+            cp "$FASTAPI_SOURCE" /home/$TARGET_USER/deployml/docker/fastapi/main.py
             echo "✅ FastAPI application copied successfully!"
         else
             echo "❌ ERROR: FastAPI application not found at: $FASTAPI_SOURCE"
@@ -2569,8 +2623,8 @@ FASTAPI_TEMPLATE_EOF
     fi
 
     # Set proper permissions
-    echo "Setting proper permissions for user: $CURRENT_USER"
-    sudo chown -R $CURRENT_USER:$CURRENT_USER /home/$CURRENT_USER/deployml
+    echo "Setting proper permissions for user: $TARGET_USER"
+    sudo chown -R $TARGET_USER:$TARGET_USER /home/$TARGET_USER/deployml
     
     # Create systemd service for Docker Compose
     echo "Creating Docker Compose systemd service..."
@@ -2583,9 +2637,9 @@ Requires=docker.service
 [Service]
 Type=oneshot
 RemainAfterExit=true
-User=$CURRENT_USER
-Group=$CURRENT_USER
-WorkingDirectory=/home/$CURRENT_USER/deployml/docker
+User=$TARGET_USER
+Group=$TARGET_USER
+WorkingDirectory=/home/$TARGET_USER/deployml/docker
 Environment=MLFLOW_BACKEND_STORE_URI={% if flags.needs_postgres %}postgresql+psycopg2://{{ flags.first_tool_name }}:{{ '${urlencode(random_password.db_password.result)}' }}@{{ '${google_sql_database_instance.postgres.public_ip_address}' }}:5432/{{ '${google_sql_database.db.name}' }}{% else %}sqlite:///mlflow.db{% endif %}
 Environment=MLFLOW_DEFAULT_ARTIFACT_ROOT={% if bucket_configs %}{% for config in bucket_configs %}{% if config.create %}gs://{{ config.bucket_name }}{% endif %}{% endfor %}{% else %}./mlflow-artifacts{% endif %}
 {% if flags.needs_feast and flags.needs_postgres %}
@@ -2599,6 +2653,7 @@ Environment=FEAST_ONLINE_STORE_DATABASE={% if flags.needs_postgres %}{{ '${var.f
 Environment=FEAST_ONLINE_STORE_USER={% if flags.needs_postgres %}{{ '${var.feast_database_user}' }}{% else %}feast{% endif %}
 Environment=FEAST_ONLINE_STORE_PASSWORD={% if flags.needs_postgres %}{{ '${random_password.db_password.result}' }}{% else %}feast{% endif %}
 Environment=FEAST_OFFLINE_STORE_TYPE=bigquery
+Environment=FEAST_PROJECT={{ flags.feast_params.get('project', (stack_name ~ '_' ~ project_id ~ '_' ~ name_hash) | replace('-', '_')) }}
 Environment=FEAST_OFFLINE_STORE_PROJECT={{ project_id }}
 Environment=FEAST_OFFLINE_STORE_DATASET={{ flags.feast_params.get('bigquery_dataset', 'feast_offline_store_' ~ stack_name ~ '_' ~ project_id ~ '_' ~ name_hash) }}
 Environment=FEAST_ARTIFACT_BUCKET={% if bucket_configs %}{% for config in bucket_configs %}{% if config.create %}{{ config.bucket_name }}{% endif %}{% endfor %}{% else %}{% endif %}
@@ -2625,16 +2680,16 @@ DOCKER_SERVICE_EOF
     
     # Create .env file for Docker Compose
     echo "Creating environment file for Docker Compose..."
-    cat > /home/$CURRENT_USER/deployml/docker/.env << ENV_EOF
+    cat > /home/$TARGET_USER/deployml/docker/.env << ENV_EOF
 EXTERNAL_MLFLOW_URL=http://$EXTERNAL_IP:{{ flags.mlflow_params.mlflow_port }}
 ENV_EOF
     
     # Build Docker containers first
     echo "Building Docker containers..."
-    cd /home/$CURRENT_USER/deployml/docker
-    if ! sudo -u $CURRENT_USER docker compose build; then
+    cd /home/$TARGET_USER/deployml/docker
+    if ! sudo -u $TARGET_USER docker compose build; then
         echo "❌ Docker build failed. Checking logs..."
-        sudo -u $CURRENT_USER docker compose logs
+        sudo -u $TARGET_USER docker compose logs
         echo "❌ Exiting due to Docker build failure"
         exit 1
     fi
@@ -2658,7 +2713,7 @@ ENV_EOF
     
     # Check container status
     echo "Checking container status..."
-    sudo -u $CURRENT_USER docker ps
+    sudo -u $TARGET_USER docker ps
     
     # Test MLflow container
     echo "Testing MLflow container..."
@@ -2671,7 +2726,7 @@ ENV_EOF
         if [ $i -eq 10 ]; then
           echo "⚠️  MLflow container may still be starting up..."
           echo "Checking MLflow container logs..."
-          sudo -u $CURRENT_USER docker logs mlflow-server
+          sudo -u $TARGET_USER docker logs mlflow-server
         fi
         sleep 15
       fi
@@ -2688,7 +2743,7 @@ ENV_EOF
         if [ $i -eq 10 ]; then
           echo "⚠️  FastAPI container may still be starting up..."
           echo "Checking FastAPI container logs..."
-          sudo -u $CURRENT_USER docker logs fastapi-proxy
+          sudo -u $TARGET_USER docker logs fastapi-proxy
         fi
         sleep 15
       fi
@@ -2706,7 +2761,7 @@ ENV_EOF
         if [ $i -eq 20 ]; then
           echo "⚠️  FEAST container may still be starting up..."
           echo "Checking FEAST container logs..."
-          sudo -u $CURRENT_USER docker logs feast-server
+          sudo -u $TARGET_USER docker logs feast-server
         fi
         sleep 15
       fi
@@ -2714,7 +2769,7 @@ ENV_EOF
     
     # Run FEAST validation script
     echo "Running FEAST deployment validation..."
-    if sudo -u $CURRENT_USER /home/$CURRENT_USER/deployml/docker/validate_feast.sh; then
+    if sudo -u $TARGET_USER /home/$TARGET_USER/deployml/docker/validate_feast.sh; then
         echo "✅ FEAST deployment validation passed"
     else
         echo "⚠️ FEAST deployment validation had issues - check logs for details"
@@ -2731,7 +2786,7 @@ ENV_EOF
         if [ $i -eq 20 ]; then
           echo "⚠️  FEAST FastAPI container may still be starting up..."
           echo "Checking FEAST FastAPI container logs..."
-          sudo -u $CURRENT_USER docker logs feast-fastapi-server
+          sudo -u $TARGET_USER docker logs feast-fastapi-server
         fi
         sleep 15
       fi
@@ -2745,7 +2800,7 @@ ENV_EOF
     # Wait for airflow-init to complete
     echo "Waiting for Airflow initialization to complete..."
     for i in {1..30}; do
-      if sudo -u $CURRENT_USER docker logs airflow-init 2>/dev/null | grep -q "3.0.4"; then
+      if sudo -u $TARGET_USER docker logs airflow-init 2>/dev/null | grep -q "3.0.4"; then
         echo "✅ Airflow initialization completed successfully!"
         break
       else
@@ -2753,7 +2808,7 @@ ENV_EOF
         if [ $i -eq 30 ]; then
           echo "⚠️  Airflow initialization may have failed..."
           echo "Checking Airflow init container logs..."
-          sudo -u $CURRENT_USER docker logs airflow-init
+          sudo -u $TARGET_USER docker logs airflow-init
         fi
         sleep 10
       fi
@@ -2770,7 +2825,7 @@ ENV_EOF
         if [ $i -eq 20 ]; then
           echo "⚠️  Airflow webserver may still be starting up..."
           echo "Checking Airflow webserver logs..."
-          sudo -u $CURRENT_USER docker logs airflow-webserver
+          sudo -u $TARGET_USER docker logs airflow-webserver
         fi
         sleep 15
       fi
@@ -2779,7 +2834,7 @@ ENV_EOF
     # Test Airflow scheduler
     echo "Testing Airflow scheduler..."
     for i in {1..20}; do
-      if sudo -u $CURRENT_USER docker logs airflow-scheduler 2>/dev/null | grep -q "Application startup complete"; then
+      if sudo -u $TARGET_USER docker logs airflow-scheduler 2>/dev/null | grep -q "Application startup complete"; then
         echo "✅ Airflow scheduler is running successfully!"
         break
       else
@@ -2787,7 +2842,7 @@ ENV_EOF
         if [ $i -eq 20 ]; then
           echo "⚠️  Airflow scheduler may still be starting up..."
           echo "Checking Airflow scheduler logs..."
-          sudo -u $CURRENT_USER docker logs airflow-scheduler
+          sudo -u $TARGET_USER docker logs airflow-scheduler
         fi
         sleep 15
       fi
@@ -2830,16 +2885,16 @@ ENV_EOF
     
     # Final verification of created files
     echo "🔍 Final verification of created files..."
-    echo "📁 Checking /home/$CURRENT_USER/deployml/docker/ directory:"
-    ls -la /home/$CURRENT_USER/deployml/docker/ || echo "❌ Directory listing failed"
+    echo "📁 Checking /home/$TARGET_USER/deployml/docker/ directory:"
+    ls -la /home/$TARGET_USER/deployml/docker/ || echo "❌ Directory listing failed"
     
-    if [ -f "/home/$CURRENT_USER/deployml/docker/docker-compose.yml" ]; then
+    if [ -f "/home/$TARGET_USER/deployml/docker/docker-compose.yml" ]; then
         echo "✅ docker-compose.yml exists"
     else
         echo "❌ docker-compose.yml missing!"
     fi
     
-    if [ -f "/home/$CURRENT_USER/deployml/docker/airflow_environment.env" ]; then
+    if [ -f "/home/$TARGET_USER/deployml/docker/airflow_environment.env" ]; then
         echo "✅ airflow_environment.env exists"
     else
         echo "❌ airflow_environment.env missing!"
@@ -3219,7 +3274,7 @@ module "{{ stage_name }}_{{ tool.name }}" {
   feast_database_user = var.feast_database_user
   feast_separate_database = var.feast_separate_database
   {% if flags.needs_postgres %}
-  backend_store_uri   = "postgresql+psycopg2://${google_sql_user.feast_user.name}:${random_password.db_password.result}@${google_sql_database_instance.postgres.public_ip_address}:5432/${google_sql_database.feast_db.name}"
+  backend_store_uri   = "postgresql+psycopg2://${google_sql_user.feast_user.name}:${urlencode(random_password.db_password.result)}@${google_sql_database_instance.postgres.public_ip_address}:5432/${google_sql_database.feast_db.name}"
   use_postgres        = true
   postgres_host       = google_sql_database_instance.postgres.public_ip_address
   postgres_port       = "5432"
@@ -3361,7 +3416,7 @@ output "postgresql_credentials" {
     db_name                  = google_sql_database.db.name
     db_public_ip             = google_sql_database_instance.postgres.public_ip_address
     instance_connection_name = google_sql_database_instance.postgres.connection_name
-    connection_string        = "postgresql+psycopg2://${google_sql_user.users.name}:${random_password.db_password.result}@${google_sql_database_instance.postgres.public_ip_address}:5432/${google_sql_database.db.name}"
+  connection_string        = "postgresql+psycopg2://${google_sql_user.users.name}:${urlencode(random_password.db_password.result)}@${google_sql_database_instance.postgres.public_ip_address}:5432/${google_sql_database.db.name}"
   }
   sensitive = true
   description = "PostgreSQL database credentials"

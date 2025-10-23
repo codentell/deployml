@@ -6,8 +6,8 @@ This README documents the complete process of setting up a Feast feature store o
 
 We successfully deployed a Feast feature store on a GCP VM with:
 - **PostgreSQL registry and online store** (Cloud SQL)
-- **File-based offline store** (local parquet)
-- **3,000 house sales records** loaded and materialized
+- **BigQuery offline store** (dataset + table)
+- **House sales records** loaded and materialized
 - **Features**: price, bedrooms, bathrooms, area_sqft, year_built, days_on_market
 
 ## Prerequisites
@@ -33,37 +33,41 @@ sudo docker ps
 # Look for feast-server container
 ```
 
-#### 1.3 Copy Parquet File to VM
+#### 1.3 Prepare data in BigQuery
 ```bash
-# From your local machine
-gcloud compute scp house_data.parquet <username>@mlflow-postgres-vm-instance:/home/<username>/deployml/
+# Load parquet into BigQuery table
+bq --project_id=<project_name> --location=us-west2 load \
+  --source_format=PARQUET \
+  <project_name>:feast_offline_store.house_data /path/to/house_data.parquet
 ```
 
 ### 2. Feast Configuration
 
 #### 2.1 Create Feature Store Configuration
-Create `feature_store.yaml` with PostgreSQL connections:
+Create `feature_store.yaml` with PostgreSQL registry/online and BigQuery offline store. Use psycopg driver:
 
 ```yaml
 project: house_sales
-provider: local
+provider: gcp
 registry:
   registry_type: sql
-  path: postgresql://feast:wruwSQnG5G*LbDFB@34.94.198.168:5432/feast
+  path: postgresql+psycopg://feast:<PASSWORD>@<POSTGRES_IP>:5432/feast
   cache_ttl_seconds: 60
   sqlalchemy_config_kwargs:
     echo: false
     pool_pre_ping: true
 online_store:
   type: postgres
-  host: 34.94.198.168
+  host: <POSTGRES_IP>
   port: 5432
   database: feast
   user: feast
-  password: wruwSQnG5G*LbDFB
+  password: <PASSWORD>
 offline_store:
-  type: file
-entity_key_serialization_version: 2
+  type: bigquery
+  project_id: hatchet16
+  dataset: feast_offline_store
+entity_key_serialization_version: 3
 ```
 
 **Key Points:**
@@ -75,8 +79,8 @@ entity_key_serialization_version: 2
 #### 2.2 Copy Configuration to Container
 ```bash
 # Copy config to the Feast container
-sudo docker cp feature_store.yaml feast-server:/app/feature_repo/feature_store.yaml
-sudo docker cp feature_store.yaml feast-server:/app/feature_store.yaml
+docker cp feature_store.yaml feast-server:/app/feature_repo/feature_store.yaml
+docker cp feature_store.yaml feast-server:/app/feature_store.yaml
 ```
 
 ### 3. Feature Definitions
@@ -97,16 +101,14 @@ house_entity = Entity(
 ```
 
 #### 3.2 Create Data Source (`data_sources.py`)
-Create this file in `/home/root/deployml/` on the VM:
+Create this file in `/home/root/deployml/` on the VM (BigQuery source with only `timestamp_field`):
 ```python
-from feast import FileSource
-from feast.data_format import ParquetFormat
+from feast import BigQuerySource
 
-house_source = FileSource(
-    name="house_source",
-    path="/app/house_data.parquet",
-    timestamp_field="event_timestamp",
-    file_format=ParquetFormat()
+house_source = BigQuerySource(
+    table="hatchet16.feast_offline_store.house_data",
+    timestamp_field="event_timestamp",  # set to your actual timestamp column
+    # created_timestamp_column="created            # optional; if multiple entries are entered for a row-tntity event
 )
 ```
 
@@ -146,17 +148,17 @@ house_features = FeatureView(
 
 ```bash
 # First, create the required directories in the container
-sudo docker exec -it feast-server mkdir -p /app/feature_repo/features
-sudo docker exec -it feast-server mkdir -p /app/feature_repo/data_sources
+docker exec -it feast-server mkdir -p /app/feature_repo/features
+docker exec -it feast-server mkdir -p /app/feature_repo/data_sources
 
 # Then move feature definition files to the container
-sudo docker cp entities.py feast-server:/app/feature_repo/features/
-sudo docker cp data_sources.py feast-server:/app/feature_repo/data_sources/
-sudo docker cp house_features.py feast-server:/app/feature_repo/features/
+docker cp entities.py feast-server:/app/feature_repo/features/
+docker cp data_sources.py feast-server:/app/feature_repo/data_sources/
+docker cp house_features.py feast-server:/app/feature_repo/features/
 
 # Verify the files are in the right place
-sudo docker exec -it feast-server ls -la /app/feature_repo/features/
-sudo docker exec -it feast-server ls -la /app/feature_repo/data_sources/
+docker exec -it feast-server ls -la /app/feature_repo/features/
+docker exec -it feast-server ls -la /app/feature_repo/data_sources/
 
 # Optional: Remove the original files from the VM since they're now in the container
 rm entities.py data_sources.py house_features.py
@@ -171,7 +173,7 @@ rm entities.py data_sources.py house_features.py
 
 #### 4.1 Apply Feature Definitions
 ```bash
-sudo docker exec -it feast-server feast apply
+docker exec -it feast-server feast apply
 ```
 
 **Expected Output:**
@@ -180,32 +182,30 @@ Applying changes for project house_sales
 Deploying infrastructure for house_features
 ```
 
+#### 4.1.1 Remove example features (if present)
+```bash
+docker exec -it feast-server sh -lc 'rm -f /app/feature_repo/example_features.py || true'
+```
+
 #### 4.2 Verify Registration
 ```bash
 # List projects
-sudo docker exec -it feast-server feast projects list
+docker exec -it feast-server feast projects list
 
 # List entities
-sudo docker exec -it feast-server feast entities list
+docker exec -it feast-server feast entities list
 
 # List features
-sudo docker exec -it feast-server feast features list
+docker exec -it feast-server feast features list
 
 # List data sources
-sudo docker exec -it feast-server feast data-sources list
+docker exec -it feast-server feast data-sources list
 ```
 
 ### 5. Data Materialization
-
-#### 5.1 Copy Parquet File to Container
+#### 5.1 Materialize Data to Online Store
 ```bash
-# Copy the parquet file to the Feast container
-sudo docker cp house_data.parquet feast-server:/app/house_data.parquet
-```
-
-#### 5.2 Materialize Data to Online Store
-```bash
-sudo docker exec -it feast-server feast materialize \
+docker exec -it feast-server feast materialize \
   --views house_features \
   2017-06-04T00:00:00 2025-08-20T23:59:59
 ```
@@ -229,7 +229,7 @@ house_features:
 
 #### 6.1 Get Online Features
 ```bash
-sudo docker exec -it feast-server feast get-online-features \
+docker exec -it feast-server feast get-online-features \
   --features house_features:price \
   --entities mls_id=112914
 ```
@@ -244,7 +244,7 @@ sudo docker exec -it feast-server feast get-online-features \
 
 #### 6.2 Get Multiple Features
 ```bash
-sudo docker exec -it feast-server python -c "
+docker exec -it feast-server python -c "
 from feast import FeatureStore
 store = FeatureStore('/app/feature_repo')
 
@@ -268,4 +268,14 @@ print(features.to_dict())
 }
 ```
 
-**Note:** The CLI has parsing issues with comma-separated features. Use the Python SDK for reliable multiple feature retrieval.
+### 7. Troubleshooting
+
+- BigQuery table not found:
+  - Ensure dataset and table exist: `bq ls --project_id=hatchet16 --location=us-west2 feast_offline_store`
+  - Load data: `bq load --source_format=PARQUET hatchet16:feast_offline_store.house_data /path/to/house_data.parquet`
+- Column errors (e.g., `created` not found):
+  - Remove `created_timestamp_column` from `BigQuerySource` or point to a real column.
+- Registry warning:
+  - Use `postgresql+psycopg://...` in `feature_store.yaml`.
+- Credentials issue:
+  - Do not set `GOOGLE_APPLICATION_CREDENTIALS` inside the container; rely on VM service account.
