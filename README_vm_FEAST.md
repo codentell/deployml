@@ -34,23 +34,23 @@ We successfully deployed a Feast feature store on a GCP VM with:
 
 ### 1. Initial Setup and Troubleshooting
 
-#### 1.1 Connect to the VM
-```bash
-gcloud compute ssh --zone us-west2-a mlflow-postgres-vm-instance
-```
-
-#### 1.2 Check Running Containers
-```bash
-sudo docker ps
-# Look for feast-server container
-```
-
-#### 1.3 Prepare data in BigQuery
+#### 1.1 Prepare data in BigQuery
 ```bash
 # Load parquet into BigQuery table
 bq --project_id=<project_name> --location=us-west2 load \
   --source_format=PARQUET \
   <project_name>:feast_offline_store.house_data /path/to/house_data.parquet
+```
+
+#### 1.2 Connect to the VM
+```bash
+gcloud compute ssh --zone us-west2-a mlflow-postgres-vm-instance
+```
+
+#### 1.3 Check Running Containers
+```bash
+sudo docker ps
+# Look for feast-server container
 ```
 
 ### 2. Feast Configuration
