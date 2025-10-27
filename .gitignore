@@ -15,3 +15,10 @@ data/us_house_Sales_data.csv
 # MkDocs build output
 site/
 dist/
+
+# Miscilaneous
+vm-stack.yaml
+mlflow.db
+*.csv
+*.house_data
+--source_format=PARQUET

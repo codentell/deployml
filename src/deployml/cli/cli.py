@@ -20,6 +20,7 @@ from typing import Optional
 import random
 import string
 from google.cloud import storage
+import hashlib
 
 # Import refactored utility functions
 from deployml.utils.helpers import (
@@ -475,6 +476,10 @@ def deploy(
         f"{cloud}/{deployment_type}/terraform.tfvars.j2"
     )
 
+    # Compute a stable short hash for resource names to avoid collisions
+    name_material = f"{workspace_name}:{project_id}".encode("utf-8")
+    name_hash = hashlib.sha1(name_material).hexdigest()[:6]
+
     # Render templates
     if deployment_type == "cloud_vm":
         main_tf = main_template.render(
@@ -486,6 +491,8 @@ def deploy(
             project_id=project_id,
             region=region,
             zone=config["provider"].get("zone", f"{region}-a"),
+            stack_name=workspace_name,
+            name_hash=name_hash,
         )
     else:
         main_tf = main_template.render(
@@ -495,9 +502,15 @@ def deploy(
             create_artifact_bucket=create_artifact_bucket,
             bucket_configs=bucket_configs,  # ← Pass structured bucket configs
             project_id=project_id,
+            stack_name=workspace_name,
+            name_hash=name_hash,
         )
     variables_tf = var_template.render(
-        stack=stack, cloud=cloud, project_id=project_id
+        stack=stack,
+        cloud=cloud,
+        project_id=project_id,
+        stack_name=workspace_name,
+        name_hash=name_hash,
     )
     tfvars_content = tfvars_template.render(
         project_id=project_id,
@@ -506,6 +519,8 @@ def deploy(
         stack=stack,
         cloud=cloud,
         create_artifact_bucket=create_artifact_bucket,
+        stack_name=workspace_name,
+        name_hash=name_hash,
     )
 
     # Write files
@@ -559,8 +574,49 @@ def deploy(
 
     cost_analysis = None
     if cost_enabled:
+        usage_file_path = cost_config.get("usage_file")
+        usage_file = Path(usage_file_path) if usage_file_path else None
+
+        # If no explicit usage file provided, generate one from high-level YAML values
+        if usage_file is None:
+            try:
+                bucket_amount = cost_config.get("bucket_amount")
+                cloudsql_amount = cost_config.get(
+                    "cloudSQL_amount"
+                ) or cost_config.get("cloudsql_amount")
+                bigquery_amount = cost_config.get(
+                    "bigQuery_amount"
+                ) or cost_config.get("bigquery_amount")
+
+                resource_type_default_usage = {}
+                # Map high-level amounts to Infracost resource defaults
+                if bucket_amount is not None:
+                    resource_type_default_usage["google_storage_bucket"] = {
+                        "storage_gb": float(bucket_amount)
+                    }
+                if cloudsql_amount is not None:
+                    resource_type_default_usage[
+                        "google_sql_database_instance"
+                    ] = {"storage_gb": float(cloudsql_amount)}
+                if bigquery_amount is not None:
+                    resource_type_default_usage["google_bigquery_table"] = {
+                        "storage_gb": float(bigquery_amount)
+                    }
+
+                if resource_type_default_usage:
+                    usage_yaml = {
+                        "version": "0.1",
+                        "resource_type_default_usage": resource_type_default_usage,
+                    }
+                    usage_file = DEPLOYML_TERRAFORM_DIR / "infracost-usage.yml"
+                    with open(usage_file, "w") as f:
+                        yaml.safe_dump(usage_yaml, f, sort_keys=False)
+            except Exception:
+                # If usage-file generation fails, continue without it
+                usage_file = None
+
         cost_analysis = run_infracost_analysis(
-            DEPLOYML_TERRAFORM_DIR, warning_threshold
+            DEPLOYML_TERRAFORM_DIR, warning_threshold, usage_file=usage_file
         )
 
     # Format confirmation message with cost information

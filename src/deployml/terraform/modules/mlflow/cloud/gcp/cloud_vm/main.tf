@@ -90,7 +90,7 @@ resource "google_compute_instance" "mlflow_vm" {
     startup-script = var.startup_script != "" ? var.startup_script : local.default_startup_script
   })
 
-  tags = var.tags
+  tags = concat(var.tags, ["ssh-server", "mlflow-server", "http-server", "https-server", "lb-health-check"]) 
 
   can_ip_forward = true
 
@@ -111,9 +111,52 @@ locals {
     
     echo "$(date): Starting MLflow VM setup..."
     
-    # Get the current user dynamically
-    CURRENT_USER=$(whoami)
-    echo "Current user: $CURRENT_USER"
+    # Configure target VM user from Terraform variable or auto-detect
+    TARGET_USER="${var.vm_user}"
+    if [ -z "$TARGET_USER" ]; then
+      echo "Auto-detecting deploy user..."
+      # Try metadata legacy SSH keys (format: username:ssh-rsa ...)
+      META_SSH=$(curl -sf -H "Metadata-Flavor: Google" \
+        http://metadata.google.internal/computeMetadata/v1/instance/attributes/ssh-keys || true)
+      if [ -n "$META_SSH" ]; then
+        TARGET_USER=$(echo "$META_SSH" | head -n1 | cut -d: -f1)
+        echo "Detected user from metadata ssh-keys: $TARGET_USER"
+      fi
+      # Fallback: use first non-root user under /home
+      if [ -z "$TARGET_USER" ]; then
+        CANDIDATE=$(ls -1 /home 2>/dev/null | grep -v '^root$' | head -n1 || true)
+        if [ -n "$CANDIDATE" ] && getent passwd "$CANDIDATE" >/dev/null 2>&1; then
+          TARGET_USER="$CANDIDATE"
+          echo "Detected user from /home: $TARGET_USER"
+        fi
+      fi
+      # Final fallback: create a dedicated deploy user
+      if [ -z "$TARGET_USER" ]; then
+        TARGET_USER="deployml"
+        echo "No user detected, defaulting to: $TARGET_USER"
+      fi
+    fi
+    echo "Target VM user: $TARGET_USER"
+    
+    # Ensure the user exists with a home directory and bash shell
+    if ! id -u "$TARGET_USER" >/dev/null 2>&1; then
+      echo "Creating user: $TARGET_USER"
+      useradd -m -s /bin/bash "$TARGET_USER"
+    else
+      echo "User $TARGET_USER already exists"
+    fi
+    
+    # Ensure sudo is available and optionally grant passwordless sudo
+    apt-get update -y
+    apt-get install -y sudo >/dev/null 2>&1 || true
+    usermod -aG sudo "$TARGET_USER" || true
+    if [ "${var.grant_sudo}" = "true" ]; then
+      echo "$TARGET_USER ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/90-$TARGET_USER
+      chmod 440 /etc/sudoers.d/90-$TARGET_USER
+      echo "Granted passwordless sudo to $TARGET_USER"
+    else
+      echo "Passwordless sudo not granted to $TARGET_USER (grant_sudo=false)"
+    fi
     
     # Update system packages
     echo "Updating system packages..."
@@ -161,8 +204,8 @@ locals {
     sudo systemctl start docker
     
     # Add current user to docker group
-    echo "Configuring Docker permissions for user: $CURRENT_USER"
-    sudo usermod -aG docker $CURRENT_USER
+    echo "Configuring Docker permissions for user: $TARGET_USER"
+    sudo usermod -aG docker $TARGET_USER
     
     # Wait for Docker to be ready
     echo "Waiting for Docker to be ready..."
@@ -176,13 +219,13 @@ locals {
     echo "Setting up containerized MLflow environment..."
     
     # Create deployment directory structure
-    mkdir -p /home/$CURRENT_USER/deployml/docker
-    mkdir -p /home/$CURRENT_USER/deployml/docker/mlflow
-    mkdir -p /home/$CURRENT_USER/deployml/docker/fastapi
+    mkdir -p /home/$TARGET_USER/deployml/docker
+    mkdir -p /home/$TARGET_USER/deployml/docker/mlflow
+    mkdir -p /home/$TARGET_USER/deployml/docker/fastapi
     
     # Create Docker Compose file
     echo "Creating Docker Compose configuration..."
-    cat > /home/$CURRENT_USER/deployml/docker/docker-compose.yml << 'DOCKER_COMPOSE_EOF'
+    cat > /home/$TARGET_USER/deployml/docker/docker-compose.yml << 'DOCKER_COMPOSE_EOF'
 version: '3.8'
 
 services:
@@ -265,7 +308,7 @@ networks:
 DOCKER_COMPOSE_EOF
 
     # Create MLflow Dockerfile
-    cat > /home/$CURRENT_USER/deployml/docker/mlflow/Dockerfile << 'MLFLOW_DOCKERFILE_EOF'
+    cat > /home/$TARGET_USER/deployml/docker/mlflow/Dockerfile << 'MLFLOW_DOCKERFILE_EOF'
 FROM python:3.9-slim
 
 # Set working directory
@@ -311,7 +354,7 @@ MLFLOW_DOCKERFILE_EOF
 
     # Create FastAPI Dockerfile
     echo "Creating FastAPI Dockerfile..."
-    cat > /home/$CURRENT_USER/deployml/docker/fastapi/Dockerfile << 'FASTAPI_DOCKERFILE_EOF'
+    cat > /home/$TARGET_USER/deployml/docker/fastapi/Dockerfile << 'FASTAPI_DOCKERFILE_EOF'
 FROM python:3.9-slim
 
 # Set working directory
@@ -369,7 +412,7 @@ FASTAPI_DOCKERFILE_EOF
     if [ "$FASTAPI_SOURCE" = "template" ]; then
         echo "Using default containerized FastAPI template..."
         # Create a containerized FastAPI application with MLflow proxy and model integration
-        cat > /home/$CURRENT_USER/deployml/docker/fastapi/main.py << 'FASTAPI_TEMPLATE_EOF'
+        cat > /home/$TARGET_USER/deployml/docker/fastapi/main.py << 'FASTAPI_TEMPLATE_EOF'
 from fastapi import FastAPI, HTTPException, Request, BackgroundTasks
 from fastapi.responses import RedirectResponse, HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -802,7 +845,7 @@ FASTAPI_TEMPLATE_EOF
         echo "✅ Default FastAPI template created successfully!"
     elif [[ "$FASTAPI_SOURCE" == gs://* ]]; then
         echo "Downloading FastAPI application from GCS: $FASTAPI_SOURCE"
-        if gsutil cp "$FASTAPI_SOURCE" /home/$CURRENT_USER/deployml/docker/fastapi/main.py; then
+        if gsutil cp "$FASTAPI_SOURCE" /home/$TARGET_USER/deployml/docker/fastapi/main.py; then
             echo "✅ FastAPI application downloaded successfully from GCS!"
         else
             echo "❌ ERROR: Failed to download FastAPI application from GCS: $FASTAPI_SOURCE"
@@ -812,7 +855,7 @@ FASTAPI_TEMPLATE_EOF
     elif [[ "$FASTAPI_SOURCE" == /* ]]; then
         echo "Copying FastAPI application from local path: $FASTAPI_SOURCE"
         if [ -f "$FASTAPI_SOURCE" ]; then
-            cp "$FASTAPI_SOURCE" /home/$CURRENT_USER/deployml/docker/fastapi/main.py
+            cp "$FASTAPI_SOURCE" /home/$TARGET_USER/deployml/docker/fastapi/main.py
             echo "✅ FastAPI application copied successfully!"
         else
             echo "❌ ERROR: FastAPI application not found at: $FASTAPI_SOURCE"
@@ -829,8 +872,8 @@ FASTAPI_TEMPLATE_EOF
     fi
 
     # Set proper permissions
-    echo "Setting proper permissions for user: $CURRENT_USER"
-    sudo chown -R $CURRENT_USER:$CURRENT_USER /home/$CURRENT_USER/deployml
+    echo "Setting proper permissions for user: $TARGET_USER"
+    sudo chown -R $TARGET_USER:$TARGET_USER /home/$TARGET_USER/deployml
     
     # Create systemd service for Docker Compose
     echo "Creating Docker Compose systemd service..."
@@ -842,9 +885,9 @@ Requires=docker.service
 
 [Service]
 Type=forking
-User=$CURRENT_USER
-Group=$CURRENT_USER
-WorkingDirectory=/home/$CURRENT_USER/deployml/docker
+User=$TARGET_USER
+Group=$TARGET_USER
+WorkingDirectory=/home/$TARGET_USER/deployml/docker
 Environment=MLFLOW_BACKEND_STORE_URI=${var.backend_store_uri}
 Environment=MLFLOW_DEFAULT_ARTIFACT_ROOT=${var.artifact_bucket != "" ? "gs://${var.artifact_bucket}" : "./mlflow-artifacts"}
 ExecStart=/usr/bin/docker-compose up -d
@@ -866,8 +909,8 @@ DOCKER_SERVICE_EOF
     
     # Build and start Docker containers
     echo "Building Docker containers..."
-    cd /home/$CURRENT_USER/deployml/docker
-    sudo -u $CURRENT_USER docker-compose build
+    cd /home/$TARGET_USER/deployml/docker
+    sudo -u $TARGET_USER docker-compose build
     
     echo "Starting Docker containers..."
     sudo systemctl start mlflow-docker.service
@@ -882,7 +925,7 @@ DOCKER_SERVICE_EOF
     
     # Check container status
     echo "Checking container status..."
-    sudo -u $CURRENT_USER docker ps
+    sudo -u $TARGET_USER docker ps
     
     # Test MLflow container
     echo "Testing MLflow container..."
@@ -895,7 +938,7 @@ DOCKER_SERVICE_EOF
         if [ $i -eq 10 ]; then
           echo "⚠️  MLflow container may still be starting up..."
           echo "Checking MLflow container logs..."
-          sudo -u $CURRENT_USER docker logs mlflow-server
+          sudo -u $TARGET_USER docker logs mlflow-server
         fi
         sleep 15
       fi
@@ -912,7 +955,7 @@ DOCKER_SERVICE_EOF
         if [ $i -eq 10 ]; then
           echo "⚠️  FastAPI container may still be starting up..."
           echo "Checking FastAPI container logs..."
-          sudo -u $CURRENT_USER docker logs fastapi-proxy
+          sudo -u $TARGET_USER docker logs fastapi-proxy
         fi
         sleep 15
       fi
@@ -1010,6 +1053,27 @@ resource "google_compute_firewall" "allow_http_https" {
 
   source_ranges = ["0.0.0.0/0"]
   target_tags   = ["http-server", "https-server"]
+}
+
+# Firewall rule to allow SSH (prefer IAP tunnel source range)
+resource "google_compute_firewall" "allow_ssh" {
+  count       = var.create_service ? 1 : 0
+  name        = "allow-ssh-mlflow-vm"
+  network     = var.network
+  project     = var.project_id
+  description = "Allow SSH access to MLflow VM"
+
+  # Explicit dependency to ensure APIs are ready FIRST
+  depends_on = [time_sleep.wait_for_api_propagation]
+
+  allow {
+    protocol = "tcp"
+    ports    = ["22"]
+  }
+
+  # Open SSH to the internet (educational use). Consider restricting in production.
+  source_ranges = ["0.0.0.0/0"]
+  target_tags   = ["ssh-server"]
 }
 
 # Firewall rule for load balancer health checks

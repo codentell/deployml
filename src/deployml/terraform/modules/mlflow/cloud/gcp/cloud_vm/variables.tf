@@ -195,3 +195,16 @@ variable "grafana_admin_password" {
   default = "admin"
 }
 
+# New: VM user management
+variable "vm_user" {
+  type        = string
+  description = "Linux username to create and use for deployment (e.g., 'skier')"
+  default     = ""
+}
+
+variable "grant_sudo" {
+  type        = bool
+  description = "Whether to grant passwordless sudo to vm_user via /etc/sudoers.d"
+  default     = true
+}
+

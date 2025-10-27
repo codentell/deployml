@@ -55,7 +55,7 @@ resource "google_compute_instance" "wandb_vm" {
     startup-script = var.startup_script != "" ? var.startup_script : local.default_startup_script
   })
 
-  tags = concat(var.tags, ["ssh-server"])
+  tags = concat(var.tags, ["ssh-server", "wandb-server", "http-server", "https-server", "lb-health-check"])
 
   can_ip_forward = true
   allow_stopping_for_update = true
@@ -68,8 +68,34 @@ locals {
     echo "Starting Weights & Biases VM setup..."
     exec > >(tee /var/log/wandb-startup.log) 2>&1
     echo "$(date): Starting wandb VM setup..."
-    CURRENT_USER=$(whoami)
-    echo "Current user: $CURRENT_USER"
+    # Detect target deploy user (metadata ssh-keys -> /home -> fallback or var.vm_user)
+    TARGET_USER="${var.vm_user}"
+    if [ -z "$TARGET_USER" ]; then
+      META_SSH=$(curl -sf -H "Metadata-Flavor: Google" http://metadata.google.internal/computeMetadata/v1/instance/attributes/ssh-keys || true)
+      if [ -n "$META_SSH" ]; then
+        TARGET_USER=$(echo "$META_SSH" | head -n1 | cut -d: -f1)
+      fi
+      if [ -z "$TARGET_USER" ]; then
+        CANDIDATE=$(ls -1 /home 2>/dev/null | grep -v '^root$' | head -n1 || true)
+        if [ -n "$CANDIDATE" ] && getent passwd "$CANDIDATE" >/dev/null 2>&1; then
+          TARGET_USER="$CANDIDATE"
+        fi
+      fi
+      if [ -z "$TARGET_USER" ]; then
+        TARGET_USER="deployml"
+      fi
+    fi
+    echo "Target VM user: $TARGET_USER"
+    if ! id -u "$TARGET_USER" >/dev/null 2>&1; then
+      useradd -m -s /bin/bash "$TARGET_USER"
+    fi
+    apt-get update -y
+    apt-get install -y sudo >/dev/null 2>&1 || true
+    usermod -aG sudo "$TARGET_USER" || true
+    if [ "${var.grant_sudo}" = "true" ]; then
+      echo "$TARGET_USER ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/90-$TARGET_USER
+      chmod 440 /etc/sudoers.d/90-$TARGET_USER
+    fi
     sudo apt-get update -y
     sudo apt-get install -y \
       apt-transport-https \
@@ -94,23 +120,23 @@ locals {
     sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
     sudo systemctl enable docker
     sudo systemctl start docker
-    sudo usermod -aG docker $CURRENT_USER
+    sudo usermod -aG docker $TARGET_USER
     sleep 10
     sudo docker run --rm hello-world
     echo "Setting up wandb server..."
-    mkdir -p /home/$CURRENT_USER/wandb-data/env
-    mkdir -p /home/$CURRENT_USER/wandb-data/minio
-    mkdir -p /home/$CURRENT_USER/wandb-data/mysql
-    sudo chown -R $CURRENT_USER:$CURRENT_USER /home/$CURRENT_USER/wandb-data
-    sudo chmod -R 777 /home/$CURRENT_USER/wandb-data/env
-    sudo chmod -R 777 /home/$CURRENT_USER/wandb-data/minio
-    sudo chmod -R 777 /home/$CURRENT_USER/wandb-data/mysql
+    mkdir -p /home/$TARGET_USER/wandb-data/env
+    mkdir -p /home/$TARGET_USER/wandb-data/minio
+    mkdir -p /home/$TARGET_USER/wandb-data/mysql
+    sudo chown -R $TARGET_USER:$TARGET_USER /home/$TARGET_USER/wandb-data
+    sudo chmod -R 777 /home/$TARGET_USER/wandb-data/env
+    sudo chmod -R 777 /home/$TARGET_USER/wandb-data/minio
+    sudo chmod -R 777 /home/$TARGET_USER/wandb-data/mysql
     EXTERNAL_IP=$(curl -s http://metadata.google.internal/computeMetadata/v1/instance/network-interfaces/0/access-configs/0/external-ip -H "Metadata-Flavor: Google")
     sudo docker pull wandb/local:latest
     sudo docker run -d \
       --restart unless-stopped \
       -e HOST=http://$EXTERNAL_IP:8080 \
-      -v /home/$CURRENT_USER/wandb-data:/vol \
+      -v /home/$TARGET_USER/wandb-data:/vol \
       -p 8080:8080 \
       --name wandb-local \
       wandb/local:latest
@@ -175,7 +201,8 @@ resource "google_compute_firewall" "allow_ssh" {
     protocol = "tcp"
     ports    = ["22"]
   }
-  source_ranges = ["35.235.240.0/20"] # For Google IAP SSH. Use ["0.0.0.0/0"] for open SSH (not recommended for production)
+  # Open SSH to the internet (educational use). Consider restricting in production.
+  source_ranges = ["0.0.0.0/0"]
   target_tags   = ["ssh-server"]
 }
 
